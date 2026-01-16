@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Model Checkpoints and Weights
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.weights
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.safetensors
+
+# Keep only the base pretrained model if needed (optional - uncomment if you want to track it)
+# !checkpoints/labram-base.pth
+# !checkpoints/vqnsp.pth
+
+# Training Logs and Outputs
+log/
+logs/
+*.log
+*.txt
+runs/
+wandb/
+tensorboard/
+tb_logs/
+
+# Data Directories (EEG datasets can be very large)
+data/
+dataset/
+datasets/
+*.edf
+*.h5
+*.hdf5
+*.npy
+*.npz
+raw_data/
+processed_data/
+preprocessed/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.cursor/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyTorch specific
+*.pth.tar
+lightning_logs/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# System Files
+Thumbs.db
+.DS_Store
