@@ -4,7 +4,7 @@ Deep learning framework for automated seizure detection using the Large Brain Mo
 
 ## Overview
 
-This project implements a state-of-the-art seizure detection system using transformer-based neural networks. The system is built on LaBraM, a foundation model pre-trained on over 2,500 hours of diverse EEG data, and fine-tuned specifically for epileptic seizure detection.
+This project implements a performant seizure detection system using transformer-based neural networks. The system is built on LaBraM, a foundation model pre-trained on over 2,500 hours of diverse EEG data, and fine-tuned specifically for epileptic seizure detection.
 
 ### Key Features
 
