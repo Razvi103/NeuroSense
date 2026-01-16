@@ -13,6 +13,7 @@ class CHBMITDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
+        # Read data directly from disk (low RAM usage)
         # Shape is (Channels, Time) -> (23, 400)
         data = self.h5_file['data'][idx]
         label = self.h5_file['labels'][idx]
@@ -20,7 +21,5 @@ class CHBMITDataset(Dataset):
         # Convert to Tensor
         data = torch.from_numpy(data).float()
         data = torch.nan_to_num(data, nan=0.0, posinf=10000.0, neginf=-10000.0)
-        # NORMALIZATION
-        data = data / 100.0 
         
         return data, label

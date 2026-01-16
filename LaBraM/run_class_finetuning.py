@@ -221,10 +221,7 @@ def get_dataset(args):
         train_dataset = CHBMITDataset(args.data_path + '/train.h5')
         val_dataset   = CHBMITDataset(args.data_path + '/val.h5')
         test_dataset  = CHBMITDataset(args.data_path + '/test.h5')
-        
-        # --- CHANGE THIS FROM 2 TO 1 ---
-        args.nb_classes = 1 
-        # -------------------------------
+        args.nb_classes = 1
         
         # Mapped to standard LaBraM channels
         ch_names = [
@@ -466,20 +463,15 @@ def main(args, ds_init):
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
-    # --- MODIFIED: Weighted Loss for Imbalance ---
     if args.dataset == 'CHBMIT':
-        # Weights: Penalize missing a Seizure (class 1) 200x more than Background
         pos_weight = torch.tensor([200.0]).to(device)
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        print("Using Weighted BCEWithLogitsLoss (pos_weight=200.0)")
-        
     elif args.nb_classes == 1:
         criterion = torch.nn.BCEWithLogitsLoss()
     elif args.smoothing > 0.:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
-    # ---------------------------------------------
 
     print("criterion = %s" % str(criterion))
 

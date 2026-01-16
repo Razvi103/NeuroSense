@@ -7,12 +7,13 @@ import h5py
 import random
 from tqdm import tqdm
 
-DATA_ROOT = '/home/shadeform/work/chbmit' 
+DATA_ROOT = '/home/shadeform/work/chbmit'
 OUTPUT_DIR = './datasets/CHBMIT'
-WINDOW_SIZE = 2     # Seconds
-STRIDE = 1          # Seconds
-TARGET_FREQ = 200   # Hz
+WINDOW_SIZE = 2
+STRIDE = 1
+TARGET_FREQ = 200
 
+# Standard 23 channels
 Standard_Channels = [
     'FP1-F7', 'F7-T7', 'T7-P7', 'P7-O1', 'FP1-F3', 'F3-C3', 'C3-P3', 'P3-O1',
     'FP2-F4', 'F4-C4', 'C4-P4', 'P4-O2', 'FP2-F8', 'F8-T8', 'T8-P8', 'P8-O2',
@@ -44,9 +45,7 @@ def parse_summary_file(summary_path):
     return file_info
 
 def get_channel_mapping(raw_channels, target_channels):
-    """
-    Intelligently maps target channels to raw channels, handling duplicates.
-    """
+    """Maps target channels to raw channels, handling duplicates."""
     raw_upper = [c.upper().strip() for c in raw_channels]
     mapping = []
     missing = []
@@ -56,22 +55,16 @@ def get_channel_mapping(raw_channels, target_channels):
         tgt_upper = tgt.upper().strip()
         candidates = []
         
-        # Scan all raw channels for potential matches
         for idx, raw in enumerate(raw_upper):
-            # Priority 1: Exact match
             if raw == tgt_upper:
                 candidates.append((0, idx))
-            # Priority 2: MNE Duplicate ( T8-P8-0 or T8-P8-1)
             elif raw.startswith(tgt_upper):
                 suffix = raw[len(tgt_upper):]
-                # Check if suffix is just a dash/number (duplicate indicator)
                 if suffix.startswith('-') and suffix[1:].isdigit():
                     candidates.append((1, idx))
-                    
-        # Sort candidates: prefer exact matches first, then duplicates
+        
         candidates.sort(key=lambda x: x[0])
         
-        # Pick the first candidate that hasn't been used yet
         found = False
         for _, idx in candidates:
             if idx not in used_indices:
@@ -87,34 +80,31 @@ def get_channel_mapping(raw_channels, target_channels):
 
 def process_file(edf_path, seizure_intervals, writer_dict):
     try:
-        # Load without verbose logs
         with mne.utils.use_log_level('ERROR'): 
             raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
     except Exception as e:
         print(f"Failed to read {os.path.basename(edf_path)}: {e}")
         return
 
-    # 1. Channel Selection
     mapping, missing = get_channel_mapping(raw.ch_names, Standard_Channels)
-    
     if len(missing) > 0:
-
         return
 
     raw.pick(mapping)
     raw.reorder_channels([raw.ch_names[i] for i in range(len(mapping))])
 
+    # Filtering & Resampling
     try:
         raw.notch_filter(60.0, verbose=False)
         raw.filter(0.1, 75.0, verbose=False)
         if raw.info['sfreq'] != TARGET_FREQ:
             raw.resample(TARGET_FREQ, verbose=False)
-        data = raw.get_data() * 1e6 # Convert to uV
+        data = raw.get_data() * 1e6
     except Exception as e:
         print(f"Processing error in {os.path.basename(edf_path)}: {e}")
         return
 
-    # 3. Segmentation
+    # Segmentation
     n_samples = data.shape[1]
     window_pts = int(WINDOW_SIZE * TARGET_FREQ)
     stride_pts = int(STRIDE * TARGET_FREQ)
@@ -135,7 +125,6 @@ def process_file(edf_path, seizure_intervals, writer_dict):
         segments.append(data[:, start:end])
         labels.append(label)
 
-    # 4. Write to HDF5
     if segments:
         dset_data = writer_dict['data']
         dset_labels = writer_dict['labels']
@@ -173,9 +162,7 @@ def main():
             intervals = intervals_map.get(fname, [])
             patient_map[pid].append((edf, intervals))
 
-    # --- SUBJECT INDEPENDENT SPLIT ---
     all_patients = list(patient_map.keys())
-    # random.shuffle(all_patients) # Optional: shuffle patients
     
     n_patients = len(all_patients)
     n_train = int(n_patients * 0.8)
