@@ -1,0 +1,36 @@
+# Checkpoints (too large for Docker image)
+checkpoints/*.pth
+checkpoints/**/*.pth
+
+# Datasets
+datasets/
+data/
+*.h5
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+log/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Visualization outputs
+*.png
+*.jpg
+*.jpeg
+
+# OS
+.DS_Store
+Thumbs.db
