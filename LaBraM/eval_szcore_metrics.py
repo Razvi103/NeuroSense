@@ -32,7 +32,7 @@ def run_rigorous_eval(args):
     model = create_model(args.model, pretrained=False, num_classes=1, 
                          drop_rate=0.0, drop_path_rate=0.1, use_mean_pooling=True,
                          qkv_bias=False, use_rel_pos_bias=False, use_abs_pos_emb=True, init_values=0.1)
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     clean_state = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}
     model.load_state_dict(clean_state, strict=False)
     model.to(device).eval()

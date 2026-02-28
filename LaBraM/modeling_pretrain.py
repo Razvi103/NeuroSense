@@ -282,7 +282,7 @@ def labram_base_patch200_1600_8k_vocab(pretrained=False, **kwargs): #5M
     model.default_cfg = _cfg()
     if pretrained:
         checkpoint = torch.load(
-            kwargs["init_ckpt"], map_location="cpu"
+            kwargs["init_ckpt"], map_location="cpu", weights_only=False
         )
         model.load_state_dict(checkpoint["model"])
     return model
@@ -303,7 +303,7 @@ def labram_large_patch200_1600_8k_vocab(pretrained=False, **kwargs): #50M
     model.default_cfg = _cfg()
     if pretrained:
         checkpoint = torch.load(
-            kwargs["init_ckpt"], map_location="cpu"
+            kwargs["init_ckpt"], map_location="cpu", weights_only=False
         )
         model.load_state_dict(checkpoint["model"])
     return model
@@ -323,7 +323,7 @@ def labram_huge_patch200_1600_8k_vocab(pretrained=False, **kwargs): #380M
     model.default_cfg = _cfg()
     if pretrained:
         checkpoint = torch.load(
-            kwargs["init_ckpt"], map_location="cpu"
+            kwargs["init_ckpt"], map_location="cpu", weights_only=False
         )
         model.load_state_dict(checkpoint["model"])
     return model

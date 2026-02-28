@@ -206,7 +206,7 @@ def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None
         if pretrained_weight.startswith('https'):
             weights = torch.hub.load_state_dict_from_url(pretrained_weight, map_location='cpu', check_hash=True)
         else:
-            weights = torch.load(pretrained_weight, map_location='cpu')
+            weights = torch.load(pretrained_weight, map_location='cpu', weights_only=False)
             
         if 'model' in weights:
             weights = weights['model']
@@ -247,7 +247,7 @@ def vqnsp_encoder_large_decoder_3x200x24(pretrained=False, pretrained_weight=Non
         if pretrained_weight.startswith('https'):
             weights = torch.hub.load_state_dict_from_url(pretrained_weight, map_location='cpu', check_hash=True)
         else:
-            weights = torch.load(pretrained_weight, map_location='cpu')
+            weights = torch.load(pretrained_weight, map_location='cpu', weights_only=False)
             
         if 'model' in weights:
             weights = weights['model']

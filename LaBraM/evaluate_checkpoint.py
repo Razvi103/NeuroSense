@@ -158,7 +158,7 @@ def run_eval(args):
     )
     
     print(f"Loading Checkpoint: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     model_state = checkpoint['model'] if 'model' in checkpoint else checkpoint
     clean_state = {k.replace('module.', ''): v for k, v in model_state.items()}
     model.load_state_dict(clean_state, strict=False)
