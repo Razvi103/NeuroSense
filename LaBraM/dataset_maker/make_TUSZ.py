@@ -1,5 +1,5 @@
 """
-Preprocesses the TUH Seizure Corpus (TUSZ) v2.0.x into HDF5 files
+Preprocesses the TUH Seizure Corpus (TUSZ) v2.0.3+ into HDF5 files
 compatible with the CHBMITDataset loader.
 
 Expected TUSZ directory layout:
@@ -11,7 +11,8 @@ Expected TUSZ directory layout:
         │           └── <session>/
         │               └── <recording>/
         │                   ├── *.edf
-        │                   └── *.tse_bi
+        │                   ├── *.csv       (per-channel annotations)
+        │                   └── *.csv_bi    (binary seizure/background)
         ├── dev/
         └── eval/
 
@@ -20,10 +21,11 @@ Output: <output_dir>/{train,val,test}.h5
     labels -> (N,)           int64     (0 = background, 1 = seizure)
 
 Usage:
-    python make_TUSZ.py --data_root /path/to/tusz_v2.0.0 --output_dir ./datasets/TUSZ
+    python make_TUSZ.py --data_root /path/to/tusz_v2.0.3 --output_dir ./datasets/TUSZ
 """
 
 import os
+import csv
 import argparse
 import numpy as np
 import mne
@@ -120,30 +122,34 @@ def get_channel_mapping(raw_channels, target_channels):
     return mapping, missing
 
 
-def parse_tse_bi(tse_path):
+def parse_csv_bi(csv_bi_path):
     """
-    Parses a .tse_bi annotation file and returns a list of
+    Parses a TUSZ v2.0.3 .csv_bi annotation file and returns a list of
     (start_sec, end_sec) tuples for seizure ('seiz') intervals.
 
     File format:
-        version = tse_v1.0.0
-        0.0000 12.5600 bckg 1.0000
-        12.5600 19.3200 seiz 1.0000
-        ...
+        # version = csv_v1.0.0
+        # bname = aaaaaaac_s002_t000
+        # duration = 262.0000 secs
+        # montage_file = nedc_eas_default_montage.txt
+        #
+        channel,start_time,stop_time,label,confidence
+        TERM,16.0173,218.0379,seiz,1.0000
     """
     intervals = []
-    with open(tse_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('version') or line.startswith('#'):
+    with open(csv_bi_path, 'r', encoding='utf-8', errors='ignore') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row or row[0].startswith('#'):
                 continue
-            parts = line.split()
-            if len(parts) < 3:
+            if row[0].strip().lower() == 'channel':
+                continue
+            if len(row) < 4:
                 continue
             try:
-                start = float(parts[0])
-                end = float(parts[1])
-                label = parts[2].lower()
+                start = float(row[1])
+                end = float(row[2])
+                label = row[3].strip().lower()
             except (ValueError, IndexError):
                 continue
             if label == 'seiz':
@@ -151,23 +157,23 @@ def parse_tse_bi(tse_path):
     return intervals
 
 
-def find_edf_tse_pairs(split_dir):
+def find_edf_annotation_pairs(split_dir):
     """
-    Recursively walks a TUSZ split directory to find all (.edf, .tse_bi) pairs.
-    Returns a list of (edf_path, tse_path) tuples.
+    Recursively walks a TUSZ split directory to find all (.edf, .csv_bi) pairs.
+    Returns a list of (edf_path, csv_bi_path) tuples.
     """
     pairs = []
     for root, _dirs, files in os.walk(split_dir):
         edf_files = [f for f in files if f.lower().endswith('.edf')]
         for edf_name in edf_files:
             base = os.path.splitext(edf_name)[0]
-            tse_name = base + '.tse_bi'
-            tse_path = os.path.join(root, tse_name)
+            csv_bi_name = base + '.csv_bi'
+            csv_bi_path = os.path.join(root, csv_bi_name)
             edf_path = os.path.join(root, edf_name)
-            if os.path.isfile(tse_path):
-                pairs.append((edf_path, tse_path))
+            if os.path.isfile(csv_bi_path):
+                pairs.append((edf_path, csv_bi_path))
             else:
-                print(f"WARNING: no .tse_bi for {edf_path}, skipping")
+                print(f"WARNING: no .csv_bi for {edf_path}, skipping")
     return sorted(pairs)
 
 
@@ -265,7 +271,7 @@ def main():
             print(f"Split directory not found: {split_dir}, skipping")
             continue
 
-        pairs = find_edf_tse_pairs(split_dir)
+        pairs = find_edf_annotation_pairs(split_dir)
         print(f"\n{'='*60}")
         print(f"Split: {split_name} -> {h5_name}  ({len(pairs)} EDF files)")
         print(f"{'='*60}")
@@ -292,8 +298,8 @@ def main():
 
             writer = {'data': f['data'], 'labels': f['labels']}
 
-            for edf_path, tse_path in tqdm(pairs, desc=split_name):
-                seizure_intervals = parse_tse_bi(tse_path)
+            for edf_path, csv_bi_path in tqdm(pairs, desc=split_name):
+                seizure_intervals = parse_csv_bi(csv_bi_path)
                 n = process_file(edf_path, seizure_intervals, writer)
                 total_segments += n
 
