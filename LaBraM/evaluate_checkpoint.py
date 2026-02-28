@@ -129,6 +129,23 @@ def compute_event_metrics(y_true, y_pred, stride_sec=1.0):
         "FAR/hr": far_per_hour
     }
 
+CHBMIT_CH_NAMES = [
+    'F7', 'T3', 'T5', 'O1', 'F3', 'C3', 'C3', 'O1',
+    'F4', 'C4', 'C4', 'O2', 'F8', 'T4', 'T6', 'O2',
+    'CZ', 'PZ', 'T5', 'FT9', 'FT10', 'T4', 'T6'
+]
+TUSZ_CH_NAMES = [
+    'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4',
+    'O1', 'O2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6',
+    'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2',
+]
+
+def get_ch_names_for_dataset(dataset):
+    if dataset == 'TUSZ':
+        return TUSZ_CH_NAMES
+    return CHBMIT_CH_NAMES
+
+
 @torch.no_grad()
 def run_eval(args):
     device = torch.device(args.device)
@@ -147,11 +164,7 @@ def run_eval(args):
     model.load_state_dict(clean_state, strict=False)
     model.to(device).eval()
 
-    ch_names_raw = [
-        'F7', 'T3', 'T5', 'O1', 'F3', 'C3', 'C3', 'O1',
-        'F4', 'C4', 'C4', 'O2', 'F8', 'T4', 'T6', 'O2',
-        'CZ', 'PZ', 'T5', 'FT9', 'FT10', 'T4', 'T6'
-    ]
+    ch_names_raw = get_ch_names_for_dataset(args.dataset)
     input_chans = utils.get_input_chans(ch_names_raw)
 
     print("Loading Datasets...")
@@ -228,6 +241,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', default='labram_base_patch200_200', type=str)
     parser.add_argument('--batch_size', default=2048, type=int)
     parser.add_argument('--device', default='cuda', type=str)
+    parser.add_argument('--dataset', default='CHBMIT', type=str,
+                        help='Dataset for channel names: CHBMIT | TUSZ')
     
     # Post-Processing Parameters
     parser.add_argument('--t_high', default=0.40, type=float, help='High threshold for seizure trigger')

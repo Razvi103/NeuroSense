@@ -172,7 +172,9 @@ def get_args():
 
     parser.add_argument('--enable_deepspeed', action='store_true', default=False)
     parser.add_argument('--dataset', default='TUAB', type=str,
-                        help='dataset: TUAB | TUEV | CHBMIT')
+                        help='dataset: TUAB | TUEV | CHBMIT | TUSZ')
+    parser.add_argument('--pos_weight', default=200.0, type=float,
+                        help='pos_weight for BCEWithLogitsLoss (used by CHBMIT / TUSZ)')
 
     known_args, _ = parser.parse_known_args()
 
@@ -246,7 +248,19 @@ def get_dataset(args):
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
         args.nb_classes = 6
         metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
-        
+
+    elif args.dataset == 'TUSZ':
+        train_dataset = CHBMITDataset(args.data_path + '/train.h5')
+        val_dataset   = CHBMITDataset(args.data_path + '/val.h5')
+        test_dataset  = CHBMITDataset(args.data_path + '/test.h5')
+        args.nb_classes = 1
+        ch_names = [
+            'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4',
+            'O1', 'O2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6',
+            'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2',
+        ]
+        metrics = ["accuracy", "balanced_accuracy", "f1", "roc_auc"]
+
     return train_dataset, test_dataset, val_dataset, ch_names, metrics
 
 
@@ -463,8 +477,8 @@ def main(args, ds_init):
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
-    if args.dataset == 'CHBMIT':
-        pos_weight = torch.tensor([200.0]).to(device)
+    if args.dataset in ('CHBMIT', 'TUSZ'):
+        pos_weight = torch.tensor([args.pos_weight]).to(device)
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     elif args.nb_classes == 1:
         criterion = torch.nn.BCEWithLogitsLoss()

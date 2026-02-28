@@ -15,7 +15,7 @@ import pandas as pd
 
 # Import your existing modules
 import utils
-from evaluate_checkpoint import CHBMITDataset, post_process_probs
+from evaluate_checkpoint import CHBMITDataset, post_process_probs, get_ch_names_for_dataset
 
 # Reuse the epoch metric function
 def compute_epoch_metrics(y_true, y_pred, fs=1, epoch_sec=10):
@@ -46,7 +46,7 @@ def main(args):
     model.load_state_dict(clean_state, strict=False)
     model.to(device).eval()
 
-    ch_names = ['F7', 'T3', 'T5', 'O1', 'F3', 'C3', 'C3', 'O1', 'F4', 'C4', 'C4', 'O2', 'F8', 'T4', 'T6', 'O2', 'CZ', 'PZ', 'T5', 'FT9', 'FT10', 'T4', 'T6']
+    ch_names = get_ch_names_for_dataset(args.dataset)
     input_chans = utils.get_input_chans(ch_names)
 
     print("Loading Test Set...")
@@ -155,6 +155,8 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', default='./checkpoints/finetune_chbmit_v1/checkpoint-19.pth', type=str)
     parser.add_argument('--model', default='labram_base_patch200_200', type=str)
     parser.add_argument('--device', default='cuda', type=str)
+    parser.add_argument('--dataset', default='CHBMIT', type=str,
+                        help='Dataset for channel names: CHBMIT | TUSZ')
     args = parser.parse_args()
     
     main(args)
