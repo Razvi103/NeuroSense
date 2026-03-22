@@ -13,7 +13,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import json
 import os
-from dataset_maker.dataset_chbmit import CHBMITDataset
+from dataset_maker.dataset_chbmit import CHBMITDataset, TUSZAdversarialDataset
 
 from pathlib import Path
 from collections import OrderedDict
@@ -23,11 +23,12 @@ from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import ModelEma
 from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
 
-from engine_for_finetuning import train_one_epoch, evaluate
+from engine_for_finetuning import train_one_epoch, train_one_epoch_adversarial, evaluate
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
 from scipy import interpolate
 import modeling_finetune
+from modeling_finetune import AdversarialNeuralTransformer
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -176,6 +177,16 @@ def get_args():
     parser.add_argument('--pos_weight', default=200.0, type=float,
                         help='pos_weight for BCEWithLogitsLoss (used by CHBMIT / TUSZ)')
 
+    # Adversarial training parameters
+    parser.add_argument('--adversarial', action='store_true', default=False,
+                        help='Enable adversarial patient-invariant training')
+    parser.add_argument('--adv_lambda', default=0.1, type=float,
+                        help='Weight for the patient adversarial loss')
+    parser.add_argument('--adv_gamma', default=10.0, type=float,
+                        help='GRL lambda ramp-up steepness (DANN schedule)')
+    parser.add_argument('--adv_hidden_dim', default=256, type=int,
+                        help='Hidden dimension of the patient discriminator MLP')
+
     known_args, _ = parser.parse_known_args()
 
     if known_args.enable_deepspeed:
@@ -193,7 +204,7 @@ def get_args():
     return parser.parse_args(), ds_init
 
 def get_models(args):
-    model = create_model(
+    backbone = create_model(
         args.model,
         pretrained=False,
         num_classes=args.nb_classes,
@@ -208,6 +219,15 @@ def get_models(args):
         init_values=args.layer_scale_init_value,
         qkv_bias=args.qkv_bias,
     )
+
+    if getattr(args, 'adversarial', False):
+        model = AdversarialNeuralTransformer(
+            backbone,
+            num_patients=args.num_patients,
+            adv_hidden_dim=args.adv_hidden_dim,
+        )
+    else:
+        model = backbone
 
     return model
 
@@ -250,9 +270,16 @@ def get_dataset(args):
         metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
 
     elif args.dataset == 'TUSZ':
-        train_dataset = CHBMITDataset(args.data_path + '/train.h5')
-        val_dataset   = CHBMITDataset(args.data_path + '/val.h5')
-        test_dataset  = CHBMITDataset(args.data_path + '/test.h5')
+        if getattr(args, 'adversarial', False):
+            train_dataset = TUSZAdversarialDataset(args.data_path + '/train.h5')
+            val_dataset   = TUSZAdversarialDataset(args.data_path + '/val.h5')
+            test_dataset  = TUSZAdversarialDataset(args.data_path + '/test.h5')
+            args.num_patients = train_dataset.num_patients
+            print(f"Adversarial mode: {args.num_patients} patients detected")
+        else:
+            train_dataset = CHBMITDataset(args.data_path + '/train.h5')
+            val_dataset   = CHBMITDataset(args.data_path + '/val.h5')
+            test_dataset  = CHBMITDataset(args.data_path + '/test.h5')
         args.nb_classes = 1
         ch_names = [
             'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4',
@@ -390,7 +417,9 @@ def main(args, ds_init):
                     pass
             checkpoint_model = new_dict
 
-        state_dict = model.state_dict()
+        # When using adversarial wrapper, load pre-trained weights into the backbone
+        load_target = model.backbone if getattr(args, 'adversarial', False) else model
+        state_dict = load_target.state_dict()
         for k in ['head.weight', 'head.bias']:
             if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
                 print(f"Removing key {k} from pretrained checkpoint")
@@ -401,7 +430,7 @@ def main(args, ds_init):
             if "relative_position_index" in key:
                 checkpoint_model.pop(key)
 
-        utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
+        utils.load_state_dict(load_target, checkpoint_model, prefix=args.model_prefix)
 
     model.to(device)
 
@@ -512,14 +541,25 @@ def main(args, ds_init):
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer,
-            device, epoch, loss_scaler, args.clip_grad, model_ema,
-            log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
-            lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
-            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq, 
-            ch_names=ch_names, is_binary=args.nb_classes == 1
-        )
+        if getattr(args, 'adversarial', False):
+            train_stats = train_one_epoch_adversarial(
+                model, criterion, data_loader_train, optimizer,
+                device, epoch, loss_scaler, args.clip_grad, model_ema,
+                log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
+                lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
+                num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
+                ch_names=ch_names, is_binary=args.nb_classes == 1,
+                total_epochs=args.epochs, adv_lambda=args.adv_lambda, adv_gamma=args.adv_gamma,
+            )
+        else:
+            train_stats = train_one_epoch(
+                model, criterion, data_loader_train, optimizer,
+                device, epoch, loss_scaler, args.clip_grad, model_ema,
+                log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
+                lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
+                num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq, 
+                ch_names=ch_names, is_binary=args.nb_classes == 1
+            )
         
         if args.output_dir and args.save_ckpt:
             utils.save_model(

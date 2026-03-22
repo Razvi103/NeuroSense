@@ -17,8 +17,9 @@ Expected TUSZ directory layout:
         └── eval/
 
 Output: <output_dir>/{train,val,test}.h5
-    data   -> (N, 23, 400)  float32   (23 unipolar channels, 2 s @ 200 Hz)
-    labels -> (N,)           int64     (0 = background, 1 = seizure)
+    data        -> (N, 23, 400)  float32   (23 unipolar channels, 2 s @ 200 Hz)
+    labels      -> (N,)          int64     (0 = background, 1 = seizure)
+    patient_ids -> (N,)          int64     (integer patient ID for adversarial training)
 
 Usage:
     python make_TUSZ.py --data_root /path/to/tusz_v2.0.3 --output_dir ./datasets/TUSZ
@@ -26,6 +27,7 @@ Usage:
 
 import os
 import csv
+import json
 import argparse
 import numpy as np
 import mne
@@ -157,10 +159,24 @@ def parse_csv_bi(csv_bi_path):
     return intervals
 
 
+def extract_patient_id(edf_path, split_dir):
+    """
+    Extracts the patient folder name from the TUSZ directory hierarchy.
+    Path structure: .../01_tcp_ar/<patient>/<session>/<recording>/<file>.edf
+    Returns the <patient> string (e.g. '00000258').
+    """
+    rel = os.path.relpath(edf_path, split_dir)
+    parts = rel.replace('\\', '/').split('/')
+    # parts: [montage, patient, session, recording, file.edf]
+    if len(parts) >= 4:
+        return parts[1]
+    return parts[0]
+
+
 def find_edf_annotation_pairs(split_dir):
     """
     Recursively walks a TUSZ split directory to find all (.edf, .csv_bi) pairs.
-    Returns a list of (edf_path, csv_bi_path) tuples.
+    Returns a list of (edf_path, csv_bi_path, patient_str) tuples.
     """
     pairs = []
     for root, _dirs, files in os.walk(split_dir):
@@ -171,13 +187,14 @@ def find_edf_annotation_pairs(split_dir):
             csv_bi_path = os.path.join(root, csv_bi_name)
             edf_path = os.path.join(root, edf_name)
             if os.path.isfile(csv_bi_path):
-                pairs.append((edf_path, csv_bi_path))
+                patient_str = extract_patient_id(edf_path, split_dir)
+                pairs.append((edf_path, csv_bi_path, patient_str))
             else:
                 print(f"WARNING: no .csv_bi for {edf_path}, skipping")
-    return sorted(pairs)
+    return sorted(pairs, key=lambda x: x[0])
 
 
-def process_file(edf_path, seizure_intervals, writer_dict):
+def process_file(edf_path, seizure_intervals, writer_dict, patient_int_id):
     """
     Loads a single EDF, selects/reorders 23 unipolar channels, filters,
     resamples, segments into 2 s windows (1 s stride), labels each window
@@ -231,15 +248,18 @@ def process_file(edf_path, seizure_intervals, writer_dict):
     if segments:
         dset_data = writer_dict['data']
         dset_labels = writer_dict['labels']
+        dset_pids = writer_dict['patient_ids']
 
         curr_len = dset_data.shape[0]
         add_len = len(segments)
 
         dset_data.resize(curr_len + add_len, axis=0)
         dset_labels.resize(curr_len + add_len, axis=0)
+        dset_pids.resize(curr_len + add_len, axis=0)
 
         dset_data[curr_len:] = np.array(segments, dtype=np.float32)
         dset_labels[curr_len:] = np.array(labels, dtype=np.int64)
+        dset_pids[curr_len:] = np.full(add_len, patient_int_id, dtype=np.int64)
 
     return len(segments)
 
@@ -265,13 +285,27 @@ def main():
 
     window_pts = int(args.window_size * TARGET_FREQ)
 
-    for split_name, h5_name in SPLIT_MAP.items():
+    # Collect all patient strings across splits for a global mapping
+    all_patient_strs = set()
+    split_pairs = {}
+    for split_name in SPLIT_MAP:
         split_dir = os.path.join(edf_root, split_name)
         if not os.path.isdir(split_dir):
-            print(f"Split directory not found: {split_dir}, skipping")
+            continue
+        pairs = find_edf_annotation_pairs(split_dir)
+        split_pairs[split_name] = pairs
+        for _, _, patient_str in pairs:
+            all_patient_strs.add(patient_str)
+
+    patient_to_int = {p: i for i, p in enumerate(sorted(all_patient_strs))}
+    print(f"\nTotal unique patients across all splits: {len(patient_to_int)}")
+
+    for split_name, h5_name in SPLIT_MAP.items():
+        if split_name not in split_pairs:
+            print(f"Split directory not found for {split_name}, skipping")
             continue
 
-        pairs = find_edf_annotation_pairs(split_dir)
+        pairs = split_pairs[split_name]
         print(f"\n{'='*60}")
         print(f"Split: {split_name} -> {h5_name}  ({len(pairs)} EDF files)")
         print(f"{'='*60}")
@@ -295,19 +329,35 @@ def main():
                 dtype='int64',
                 chunks=(64,),
             )
+            f.create_dataset(
+                'patient_ids',
+                shape=(0,),
+                maxshape=(None,),
+                dtype='int64',
+                chunks=(64,),
+            )
 
-            writer = {'data': f['data'], 'labels': f['labels']}
+            f.attrs['patient_to_int'] = json.dumps(patient_to_int)
 
-            for edf_path, csv_bi_path in tqdm(pairs, desc=split_name):
+            writer = {
+                'data': f['data'],
+                'labels': f['labels'],
+                'patient_ids': f['patient_ids'],
+            }
+
+            for edf_path, csv_bi_path, patient_str in tqdm(pairs, desc=split_name):
                 seizure_intervals = parse_csv_bi(csv_bi_path)
-                n = process_file(edf_path, seizure_intervals, writer)
+                pid = patient_to_int[patient_str]
+                n = process_file(edf_path, seizure_intervals, writer, pid)
                 total_segments += n
 
             total_seizure = int(np.sum(f['labels'][:]))
+            unique_patients = len(set(f['patient_ids'][:].tolist()))
 
         print(f"  Total segments: {total_segments}")
         print(f"  Seizure segments: {total_seizure}  "
               f"({100*total_seizure/max(total_segments,1):.2f}%)")
+        print(f"  Unique patients: {unique_patients}")
         print(f"  Saved to {h5_path}")
 
     print("\nDone.")

@@ -463,6 +463,155 @@ class NeuralTransformer(nn.Module):
         return features
 
 
+# ---------------------------------------------------------------------------
+#  Adversarial representation learning components
+# ---------------------------------------------------------------------------
+
+class GradientReversalFunction(torch.autograd.Function):
+    """Negates gradients in the backward pass, scaled by lambda_."""
+
+    @staticmethod
+    def forward(ctx, x, lambda_):
+        ctx.lambda_ = lambda_
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambda_ * grad_output, None
+
+
+class GradientReversalLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lambda_ = 1.0
+
+    def set_lambda(self, lambda_):
+        self.lambda_ = lambda_
+
+    def forward(self, x):
+        return GradientReversalFunction.apply(x, self.lambda_)
+
+
+class ChannelAttention(nn.Module):
+    """
+    Learns per-channel importance weights from transformer patch tokens.
+    Input:  patch tokens (B, N_channels * N_time, D)
+    Output: attention-weighted pooled representation (B, D)
+    """
+
+    def __init__(self, embed_dim, reduction=4):
+        super().__init__()
+        self.attn_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim // reduction, 1),
+        )
+
+    def forward(self, patch_tokens, n_channels, n_time):
+        B, N, D = patch_tokens.shape
+        # (B, n_channels, n_time, D)
+        x = patch_tokens.view(B, n_channels, n_time, D)
+        # per-channel feature: average over time patches
+        chan_feat = x.mean(dim=2)  # (B, n_channels, D)
+        # attention scores
+        scores = self.attn_mlp(chan_feat)  # (B, n_channels, 1)
+        weights = torch.softmax(scores, dim=1)  # (B, n_channels, 1)
+        # weighted sum of per-channel features
+        pooled = (chan_feat * weights).sum(dim=1)  # (B, D)
+        return pooled, weights.squeeze(-1)
+
+
+class PatientDiscriminator(nn.Module):
+    """MLP that predicts patient identity from features."""
+
+    def __init__(self, embed_dim, num_patients, hidden_dim=256, dropout=0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, num_patients),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class AdversarialNeuralTransformer(nn.Module):
+    """
+    Wraps a pre-trained NeuralTransformer backbone with:
+    - Channel attention (replaces default mean pooling)
+    - Gradient reversal layer + patient discriminator
+    During training: returns (seizure_logits, patient_logits)
+    During eval:     returns seizure_logits only
+    """
+
+    def __init__(self, backbone, num_patients, adv_hidden_dim=256):
+        super().__init__()
+        self.backbone = backbone
+        embed_dim = backbone.embed_dim
+
+        self.channel_attention = ChannelAttention(embed_dim)
+        self.fc_norm = nn.LayerNorm(embed_dim)
+        self.seizure_head = nn.Linear(embed_dim, backbone.num_classes)
+
+        self.grl = GradientReversalLayer()
+        self.patient_discriminator = PatientDiscriminator(
+            embed_dim, num_patients, hidden_dim=adv_hidden_dim,
+        )
+
+        trunc_normal_(self.seizure_head.weight, std=0.02)
+        nn.init.constant_(self.seizure_head.bias, 0)
+
+    @property
+    def patch_size(self):
+        return self.backbone.patch_size
+
+    def get_num_layers(self):
+        return self.backbone.get_num_layers()
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        nwd = set()
+        for name, _ in self.backbone.named_parameters():
+            if any(kw in name for kw in ('pos_embed', 'cls_token', 'time_embed')):
+                nwd.add(f'backbone.{name}')
+        return nwd
+
+    def set_grl_lambda(self, lambda_):
+        self.grl.set_lambda(lambda_)
+
+    def forward(self, x, input_chans=None, **kwargs):
+        batch_size, n_channels, n_time, patch_size = x.shape
+
+        # Get per-patch tokens from backbone (skip its own pooling/head)
+        patch_tokens = self.backbone.forward_features(
+            x, input_chans=input_chans, return_patch_tokens=True,
+        )  # (B, n_channels * n_time, D)
+
+        # Channel-attention pooling
+        pooled, attn_weights = self.channel_attention(
+            patch_tokens, n_channels, n_time,
+        )
+        features = self.fc_norm(pooled)  # (B, D)
+
+        seizure_logits = self.seizure_head(features)
+
+        if self.training:
+            reversed_features = self.grl(features)
+            patient_logits = self.patient_discriminator(reversed_features)
+            return seizure_logits, patient_logits
+
+        return seizure_logits
+
+
+# ---------------------------------------------------------------------------
+#  Model registry
+# ---------------------------------------------------------------------------
+
 @register_model
 def labram_base_patch200_200(pretrained=False, **kwargs):
     model = NeuralTransformer(
