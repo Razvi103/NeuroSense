@@ -64,7 +64,7 @@ def run_rigorous_eval(args):
     
     print("\n--- Epoch-Based Evaluation ---")
     
-    yt_epoch, yp_epoch = compute_epoch_metrics(y_true, y_pred_pp, epoch_sec=10)
+    yt_epoch, yp_epoch = compute_epoch_metrics(y_true, y_pred_pp, epoch_sec=5)
     
     epoch_f1 = f1_score(yt_epoch, yp_epoch)
     kappa = cohen_kappa_score(yt_epoch, yp_epoch)
