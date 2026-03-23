@@ -18,6 +18,7 @@ from tqdm import tqdm
 import utils
 from timm.models import create_model
 import modeling_finetune
+from modeling_finetune import AdversarialNeuralTransformer
 
 # --- 1. Dataset Class ---
 class CHBMITDataset(Dataset):
@@ -146,23 +147,50 @@ def get_ch_names_for_dataset(dataset):
     return CHBMIT_CH_NAMES
 
 
+def load_model(args, device=None):
+    """Load a baseline or adversarial model from a checkpoint.
+
+    When ``--adversarial`` is set the backbone is wrapped in
+    :class:`AdversarialNeuralTransformer` and ``num_patients`` is
+    auto-detected from the checkpoint so the caller never needs to
+    specify it.
+    """
+    if device is None:
+        device = torch.device(getattr(args, 'device', 'cuda'))
+
+    backbone = create_model(
+        args.model, pretrained=False, num_classes=1,
+        drop_rate=0.0, drop_path_rate=0.1, use_mean_pooling=True,
+        qkv_bias=False, use_rel_pos_bias=False, use_abs_pos_emb=True,
+        init_values=0.1,
+    )
+
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    model_state = checkpoint['model'] if 'model' in checkpoint else checkpoint
+    clean_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+
+    if getattr(args, 'adversarial', False):
+        num_patients = clean_state['patient_discriminator.net.4.weight'].shape[0]
+        adv_hidden = getattr(args, 'adv_hidden_dim', 256)
+        model = AdversarialNeuralTransformer(
+            backbone, num_patients=num_patients, adv_hidden_dim=adv_hidden,
+        )
+        model.load_state_dict(clean_state, strict=False)
+        print(f"Loaded adversarial model ({num_patients} patients)")
+    else:
+        backbone.load_state_dict(clean_state, strict=False)
+        model = backbone
+
+    model.to(device).eval()
+    return model
+
+
 @torch.no_grad()
 def run_eval(args):
     device = torch.device(args.device)
     
     print(f"Loading Model: {args.model}")
-    model = create_model(
-        args.model, pretrained=False, num_classes=1, 
-        drop_rate=0.0, drop_path_rate=0.1, use_mean_pooling=True,
-        qkv_bias=False, use_rel_pos_bias=False, use_abs_pos_emb=True, init_values=0.1
-    )
-    
-    print(f"Loading Checkpoint: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    model_state = checkpoint['model'] if 'model' in checkpoint else checkpoint
-    clean_state = {k.replace('module.', ''): v for k, v in model_state.items()}
-    model.load_state_dict(clean_state, strict=False)
-    model.to(device).eval()
+    model = load_model(args, device)
 
     ch_names_raw = get_ch_names_for_dataset(args.dataset)
     input_chans = utils.get_input_chans(ch_names_raw)
@@ -243,6 +271,8 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='cuda', type=str)
     parser.add_argument('--dataset', default='CHBMIT', type=str,
                         help='Dataset for channel names: CHBMIT | TUSZ')
+    parser.add_argument('--adversarial', action='store_true',
+                        help='Load an adversarial (GRL+Attention) checkpoint')
     
     # Post-Processing Parameters
     parser.add_argument('--t_high', default=0.40, type=float, help='High threshold for seizure trigger')

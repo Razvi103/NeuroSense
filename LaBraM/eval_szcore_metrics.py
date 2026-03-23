@@ -5,10 +5,9 @@ import pandas as pd
 from sklearn.metrics import f1_score, cohen_kappa_score, confusion_matrix
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from timm.models import create_model
 import utils
 from einops import rearrange
-from evaluate_checkpoint import CHBMITDataset, post_process_probs, get_ch_names_for_dataset
+from evaluate_checkpoint import CHBMITDataset, post_process_probs, get_ch_names_for_dataset, load_model
 
 def compute_epoch_metrics(y_true, y_pred, fs=1, epoch_sec=10):
     """Divides the timeline into fixed epoch windows and applies max pooling."""
@@ -29,13 +28,7 @@ def run_rigorous_eval(args):
     device = torch.device(args.device)
     
     print(f"Loading Model: {args.model}")
-    model = create_model(args.model, pretrained=False, num_classes=1, 
-                         drop_rate=0.0, drop_path_rate=0.1, use_mean_pooling=True,
-                         qkv_bias=False, use_rel_pos_bias=False, use_abs_pos_emb=True, init_values=0.1)
-    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    clean_state = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}
-    model.load_state_dict(clean_state, strict=False)
-    model.to(device).eval()
+    model = load_model(args, device)
 
     ch_names = get_ch_names_for_dataset(args.dataset)
     input_chans = utils.get_input_chans(ch_names)
@@ -83,6 +76,8 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='cuda', type=str)
     parser.add_argument('--dataset', default='CHBMIT', type=str,
                         help='Dataset for channel names: CHBMIT | TUSZ')
+    parser.add_argument('--adversarial', action='store_true',
+                        help='Load an adversarial (GRL+Attention) checkpoint')
     args = parser.parse_args()
     
     run_rigorous_eval(args)

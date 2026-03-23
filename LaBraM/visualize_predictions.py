@@ -6,25 +6,16 @@ import pandas as pd
 from torch.utils.data import DataLoader
 from einops import rearrange
 from tqdm import tqdm
-from timm.models import create_model
 import utils
 import modeling_finetune
-from evaluate_checkpoint import CHBMITDataset, post_process_probs, get_ch_names_for_dataset
+from evaluate_checkpoint import CHBMITDataset, post_process_probs, get_ch_names_for_dataset, load_model
 
 @torch.no_grad()
 def visualize(args):
     device = torch.device(args.device)
     
     print(f"Loading Model & Checkpoint...")
-    model = create_model(
-        args.model, pretrained=False, num_classes=1, 
-        drop_rate=0.0, drop_path_rate=0.1, use_mean_pooling=True,
-        qkv_bias=False, use_rel_pos_bias=False, use_abs_pos_emb=True, init_values=0.1
-    )
-    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    clean_state = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}
-    model.load_state_dict(clean_state, strict=False)
-    model.to(device).eval()
+    model = load_model(args, device)
 
     ch_names_raw = get_ch_names_for_dataset(args.dataset)
     input_chans = utils.get_input_chans(ch_names_raw)
@@ -111,6 +102,8 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='cuda', type=str)
     parser.add_argument('--dataset', default='CHBMIT', type=str,
                         help='Dataset for channel names: CHBMIT | TUSZ')
+    parser.add_argument('--adversarial', action='store_true',
+                        help='Load an adversarial (GRL+Attention) checkpoint')
     
     # Visualization Params (Match your best eval settings)
     parser.add_argument('--t_high', default=0.4, type=float)
