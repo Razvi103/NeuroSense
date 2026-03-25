@@ -138,7 +138,7 @@ CHBMIT_CH_NAMES = [
 TUSZ_CH_NAMES = [
     'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4',
     'O1', 'O2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6',
-    'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2',
+    'FZ', 'CZ', 'PZ',
 ]
 
 def get_ch_names_for_dataset(dataset):
@@ -170,7 +170,8 @@ def load_model(args, device=None):
     clean_state = {k.replace('module.', ''): v for k, v in model_state.items()}
 
     if getattr(args, 'adversarial', False):
-        num_patients = clean_state['patient_discriminator.net.4.weight'].shape[0]
+        disc_key = [k for k in clean_state if k.startswith('patient_discriminator') and k.endswith('.weight')][-1]
+        num_patients = clean_state[disc_key].shape[0]
         adv_hidden = getattr(args, 'adv_hidden_dim', 256)
         model = AdversarialNeuralTransformer(
             backbone, num_patients=num_patients, adv_hidden_dim=adv_hidden,

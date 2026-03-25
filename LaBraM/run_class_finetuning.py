@@ -284,7 +284,7 @@ def get_dataset(args):
         ch_names = [
             'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4',
             'O1', 'O2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6',
-            'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2',
+            'FZ', 'CZ', 'PZ',
         ]
         metrics = ["accuracy", "balanced_accuracy", "f1", "roc_auc"]
 
