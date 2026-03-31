@@ -173,7 +173,7 @@ def load_model(args, device=None):
     if getattr(args, 'adversarial', False):
         disc_key = [k for k in clean_state if k.startswith('patient_discriminator') and k.endswith('.weight')][-1]
         num_patients = clean_state[disc_key].shape[0]
-        adv_hidden = getattr(args, 'adv_hidden_dim', 256)
+        adv_hidden = getattr(args, 'adv_hidden_dim', 512)
         model = AdversarialNeuralTransformer(
             backbone, num_patients=num_patients, adv_hidden_dim=adv_hidden,
         )
