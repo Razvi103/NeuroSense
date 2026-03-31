@@ -19,6 +19,7 @@ import utils
 from timm.models import create_model
 import modeling_finetune
 from modeling_finetune import AdversarialNeuralTransformer
+from scorenet import ScoreNet, hard_constraints
 
 # --- 1. Dataset Class ---
 class CHBMITDataset(Dataset):
@@ -186,6 +187,33 @@ def load_model(args, device=None):
     return model
 
 
+def load_scorenet(ckpt_path, device):
+    """Load a trained ScoreNet checkpoint."""
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    saved_args = ckpt.get('args', {})
+    net = ScoreNet(
+        input_dim=1,
+        hidden_dim=saved_args.get('hidden_dim', 64),
+        num_layers=saved_args.get('num_layers', 2),
+    )
+    net.load_state_dict(ckpt['model_state_dict'])
+    net.to(device).eval()
+    print(f"Loaded ScoreNet from {ckpt_path} "
+          f"(epoch {ckpt.get('epoch', '?')}, "
+          f"val_event_F1={ckpt.get('val_event_f1', '?'):.4f})")
+    return net
+
+
+@torch.no_grad()
+def scorenet_postprocess(y_prob, scorenet_model, device, threshold=0.5, min_dur_sec=10):
+    """Run ScoreNet on a flat probability array and apply hard constraints."""
+    inp = torch.from_numpy(y_prob.astype(np.float32)).unsqueeze(0).unsqueeze(-1).to(device)
+    refined = scorenet_model(inp).squeeze(0).squeeze(-1).cpu().numpy()
+    preds = (refined >= threshold).astype(int)
+    preds = hard_constraints(preds, min_dur_sec=min_dur_sec)
+    return preds, refined
+
+
 @torch.no_grad()
 def run_eval(args):
     device = torch.device(args.device)
@@ -224,16 +252,26 @@ def run_eval(args):
     y_prob = np.array(all_probs)
     y_true = np.array(all_targets)
 
-    print(f"\n--- Post-Processing ---")
-    print(f"Params: T_High={args.t_high}, T_Low={args.t_low}, Smooth={args.smooth}s, MinDur={args.min_dur}s")
-    
-    y_pred_pp = post_process_probs(
-        y_prob, 
-        t_high=args.t_high, 
-        t_low=args.t_low, 
-        smooth_window=args.smooth, 
-        min_duration=args.min_dur
-    )
+    scorenet_ckpt = getattr(args, 'scorenet_checkpoint', None)
+    if scorenet_ckpt:
+        print(f"\n--- ScoreNet Post-Processing ---")
+        sn_model = load_scorenet(scorenet_ckpt, device)
+        threshold = getattr(args, 'sn_threshold', 0.5)
+        min_dur = getattr(args, 'sn_min_dur', 10)
+        print(f"Params: threshold={threshold}, min_dur_sec={min_dur}")
+        y_pred_pp, y_refined = scorenet_postprocess(
+            y_prob, sn_model, device,
+            threshold=threshold, min_dur_sec=min_dur)
+    else:
+        print(f"\n--- Hand-Tuned Post-Processing ---")
+        print(f"Params: T_High={args.t_high}, T_Low={args.t_low}, Smooth={args.smooth}s, MinDur={args.min_dur}s")
+        y_pred_pp = post_process_probs(
+            y_prob,
+            t_high=args.t_high,
+            t_low=args.t_low,
+            smooth_window=args.smooth,
+            min_duration=args.min_dur
+        )
     
     print("\n--- Point-Wise Metrics ---")
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred_pp).ravel()
@@ -275,11 +313,19 @@ if __name__ == '__main__':
     parser.add_argument('--adversarial', action='store_true',
                         help='Load an adversarial (GRL+Attention) checkpoint')
     
-    # Post-Processing Parameters
+    # Hand-tuned post-processing parameters
     parser.add_argument('--t_high', default=0.40, type=float, help='High threshold for seizure trigger')
     parser.add_argument('--t_low', default=0.20, type=float, help='Low threshold for seizure continuation')
     parser.add_argument('--smooth', default=5, type=int, help='Smoothing window size (seconds)')
     parser.add_argument('--min_dur', default=5, type=int, help='Minimum seizure duration (seconds)')
-    
+
+    # ScoreNet post-processing (overrides hand-tuned if provided)
+    parser.add_argument('--scorenet_checkpoint', default=None, type=str,
+                        help='Path to trained ScoreNet .pth; uses learned postprocessing')
+    parser.add_argument('--sn_threshold', default=0.5, type=float,
+                        help='Threshold for ScoreNet refined probabilities')
+    parser.add_argument('--sn_min_dur', default=10, type=int,
+                        help='Min event duration in seconds (ACNS: >=10s)')
+
     args = parser.parse_args()
     run_eval(args)
