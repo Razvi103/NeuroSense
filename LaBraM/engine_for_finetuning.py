@@ -221,10 +221,23 @@ def get_grl_lambda(epoch, total_epochs, gamma=10.0):
 
 
 def train_adversarial_batch(model, samples, target, patient_ids, criterion, input_chans):
-    seizure_logits, patient_logits = model(samples, input_chans)
+    model_out = model(samples, input_chans)
+
+    if len(model_out) == 3:
+        seizure_logits, patient_logits, aux_logits_dict = model_out
+    else:
+        seizure_logits, patient_logits = model_out
+        aux_logits_dict = {}
+
     seizure_loss = criterion(seizure_logits, target)
     patient_loss = F.cross_entropy(patient_logits, patient_ids)
-    return seizure_loss, patient_loss, seizure_logits
+
+    aux_loss = torch.tensor(0.0, device=seizure_loss.device)
+    if aux_logits_dict:
+        aux_losses = [F.cross_entropy(logits, patient_ids) for logits in aux_logits_dict.values()]
+        aux_loss = torch.stack(aux_losses).mean()
+
+    return seizure_loss, patient_loss, aux_loss, seizure_logits
 
 
 def train_one_epoch_adversarial(
@@ -284,17 +297,21 @@ def train_one_epoch_adversarial(
 
         if loss_scaler is None:
             samples = samples.half()
-            seizure_loss, patient_loss, output = train_adversarial_batch(
+            seizure_loss, patient_loss, aux_loss, output = train_adversarial_batch(
                 model, samples, targets, patient_ids, criterion, input_chans)
         else:
             with torch.amp.autocast('cuda'):
-                seizure_loss, patient_loss, output = train_adversarial_batch(
+                seizure_loss, patient_loss, aux_loss, output = train_adversarial_batch(
                     model, samples, targets, patient_ids, criterion, input_chans)
 
-        loss = seizure_loss + adv_lambda * patient_loss
+        adv_terms = [patient_loss]
+        if aux_loss.item() > 0:
+            adv_terms.append(aux_loss)
+        loss = seizure_loss + adv_lambda * torch.stack(adv_terms).mean()
         loss_value = loss.item()
         seizure_loss_value = seizure_loss.item()
         patient_loss_value = patient_loss.item()
+        aux_loss_value = aux_loss.item()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
@@ -335,6 +352,7 @@ def train_one_epoch_adversarial(
         metric_logger.update(loss=loss_value)
         metric_logger.update(seizure_loss=seizure_loss_value)
         metric_logger.update(patient_loss=patient_loss_value)
+        metric_logger.update(aux_patient_loss=aux_loss_value)
         metric_logger.update(class_acc=class_acc)
         metric_logger.update(loss_scale=loss_scale_value)
         min_lr = 10.
@@ -356,6 +374,7 @@ def train_one_epoch_adversarial(
             log_writer.update(loss=loss_value, head="loss")
             log_writer.update(seizure_loss=seizure_loss_value, head="loss")
             log_writer.update(patient_loss=patient_loss_value, head="loss")
+            log_writer.update(aux_patient_loss=aux_loss_value, head="loss")
             log_writer.update(class_acc=class_acc, head="loss")
             log_writer.update(grl_lambda=grl_lambda, head="loss")
             log_writer.update(loss_scale=loss_scale_value, head="opt")

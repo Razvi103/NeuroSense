@@ -545,14 +545,21 @@ class AdversarialNeuralTransformer(nn.Module):
     Wraps a pre-trained NeuralTransformer backbone with:
     - Channel attention (replaces default mean pooling)
     - Gradient reversal layer + patient discriminator
-    During training: returns (seizure_logits, patient_logits)
-    During eval:     returns seizure_logits only
+    - Optional multi-layer adversarial heads via forward hooks
+
+    During training with intermediate_layers:
+        returns (seizure_logits, patient_logits, aux_patient_logits_dict)
+    During training without intermediate_layers (backward compat):
+        returns (seizure_logits, patient_logits)
+    During eval: returns seizure_logits only
     """
 
-    def __init__(self, backbone, num_patients, adv_hidden_dim=256):
+    def __init__(self, backbone, num_patients, adv_hidden_dim=256,
+                 intermediate_layers=()):
         super().__init__()
         self.backbone = backbone
         embed_dim = backbone.embed_dim
+        self.intermediate_layers = tuple(intermediate_layers)
 
         self.channel_attention = ChannelAttention(embed_dim)
         self.fc_norm = nn.LayerNorm(embed_dim)
@@ -565,6 +572,28 @@ class AdversarialNeuralTransformer(nn.Module):
 
         trunc_normal_(self.seizure_head.weight, std=0.02)
         nn.init.constant_(self.seizure_head.bias, 0)
+
+        # Multi-layer adversarial heads (hook-based, zero backbone changes)
+        self._intermediate_features = {}
+        self.aux_grls = nn.ModuleDict()
+        self.aux_discriminators = nn.ModuleDict()
+
+        aux_hidden = max(adv_hidden_dim // 2, 64)
+        for idx in self.intermediate_layers:
+            tag = str(idx)
+            self.backbone.blocks[idx].register_forward_hook(
+                self._make_hook(idx)
+            )
+            self.aux_grls[tag] = GradientReversalLayer()
+            self.aux_discriminators[tag] = PatientDiscriminator(
+                embed_dim, num_patients, hidden_dim=aux_hidden,
+            )
+
+    def _make_hook(self, layer_idx):
+        """Return a hook that stores mean-pooled patch tokens (CLS excluded)."""
+        def _hook(_module, _input, output):
+            self._intermediate_features[layer_idx] = output[:, 1:, :].mean(dim=1)
+        return _hook
 
     @property
     def patch_size(self):
@@ -583,16 +612,18 @@ class AdversarialNeuralTransformer(nn.Module):
 
     def set_grl_lambda(self, lambda_):
         self.grl.set_lambda(lambda_)
+        for grl in self.aux_grls.values():
+            grl.set_lambda(lambda_)
 
     def forward(self, x, input_chans=None, **kwargs):
         batch_size, n_channels, n_time, patch_size = x.shape
 
-        # Get per-patch tokens from backbone (skip its own pooling/head)
+        self._intermediate_features.clear()
+
         patch_tokens = self.backbone.forward_features(
             x, input_chans=input_chans, return_patch_tokens=True,
         )  # (B, n_channels * n_time, D)
 
-        # Channel-attention pooling
         pooled, attn_weights = self.channel_attention(
             patch_tokens, n_channels, n_time,
         )
@@ -603,6 +634,16 @@ class AdversarialNeuralTransformer(nn.Module):
         if self.training:
             reversed_features = self.grl(features)
             patient_logits = self.patient_discriminator(reversed_features)
+
+            if self.intermediate_layers:
+                aux_patient_logits = {}
+                for idx in self.intermediate_layers:
+                    tag = str(idx)
+                    feat = self._intermediate_features[idx]
+                    rev = self.aux_grls[tag](feat)
+                    aux_patient_logits[idx] = self.aux_discriminators[tag](rev)
+                return seizure_logits, patient_logits, aux_patient_logits
+
             return seizure_logits, patient_logits
 
         return seizure_logits

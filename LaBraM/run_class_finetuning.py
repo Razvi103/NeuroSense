@@ -186,6 +186,9 @@ def get_args():
                         help='GRL lambda ramp-up steepness (DANN schedule)')
     parser.add_argument('--adv_hidden_dim', default=256, type=int,
                         help='Hidden dimension of the patient discriminator MLP')
+    parser.add_argument('--intermediate_layers', default='', type=str,
+                        help='Comma-separated backbone block indices for multi-layer '
+                             'adversarial heads (e.g. "3,7"). Empty = disabled.')
 
     known_args, _ = parser.parse_known_args()
 
@@ -221,10 +224,13 @@ def get_models(args):
     )
 
     if getattr(args, 'adversarial', False):
+        il_str = getattr(args, 'intermediate_layers', '')
+        intermediate = tuple(int(x) for x in il_str.split(',') if x.strip()) if il_str else ()
         model = AdversarialNeuralTransformer(
             backbone,
             num_patients=args.num_patients,
             adv_hidden_dim=args.adv_hidden_dim,
+            intermediate_layers=intermediate,
         )
     else:
         model = backbone
