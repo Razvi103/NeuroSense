@@ -92,13 +92,14 @@ def main():
     parser.add_argument('--output_dir', default='./scorenet_checkpoints', type=str)
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--lr', default=1e-2, type=float)
-    parser.add_argument('--batch_size', default=8, type=int)
+    parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--w', default=6, type=int,
                         help='Half-width of conv filter (filter_len = 2w+1)')
     parser.add_argument('--gamma', default=0.5, type=float,
                         help='Candidate threshold (fixed)')
-    parser.add_argument('--max_len', default=None, type=int,
-                        help='Max sub-sequence length for chunking (None=full patient)')
+    parser.add_argument('--max_len', default=5000, type=int,
+                        help='Max sub-sequence length per chunk (prevents single-group '
+                             'collapse on long TUSZ recordings; use 0 for full patient)')
     parser.add_argument('--threshold', default=0.5, type=float,
                         help='Threshold for point-wise eval')
     parser.add_argument('--device', default='cuda', type=str)
@@ -107,20 +108,22 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device(args.device)
 
+    max_len = args.max_len if args.max_len > 0 else None
+
     print("Loading datasets ...")
     train_dset = ProbSequenceDataset(
         os.path.join(args.data_dir, 'train.npz'),
-        w=args.w, max_len=args.max_len)
+        w=args.w, max_len=max_len)
     val_dset = ProbSequenceDataset(
         os.path.join(args.data_dir, 'val.npz'),
-        w=args.w, max_len=args.max_len)
+        w=args.w, max_len=max_len)
 
     train_loader = DataLoader(
         train_dset, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_fn, num_workers=0, pin_memory=False)
+        collate_fn=collate_fn, num_workers=4, pin_memory=True)
     val_loader = DataLoader(
         val_dset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=0, pin_memory=False)
+        collate_fn=collate_fn, num_workers=4, pin_memory=True)
 
     print(f"  Train: {len(train_dset)} sequences")
     print(f"  Val:   {len(val_dset)} sequences")

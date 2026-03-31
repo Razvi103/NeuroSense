@@ -14,6 +14,9 @@ Architecture (Equations 1-4 of the paper):
     final      yhat_i = sigmoid(a4 * c_i * o_l + b4) -- per epoch
 
 Total learnable parameters: 2*(2w+1) + 6 = 32 when w=6.
+
+The forward pass is fully vectorised using scatter/segment ops — no Python
+loops over time steps or groups.
 """
 
 import numpy as np
@@ -36,7 +39,7 @@ class ScoreNet(nn.Module):
         filter_len = 2 * w + 1
 
         self.a1 = nn.Parameter(torch.ones(filter_len))
-        self.b1 = nn.Parameter(torch.tensor(-1.0))
+        self.b1 = nn.Parameter(torch.tensor(-6.0))
         self.a2 = nn.Parameter(torch.ones(filter_len))
         self.b2 = nn.Parameter(torch.tensor(-2.0))
         self.a3 = nn.Parameter(torch.tensor(3.0))
@@ -55,51 +58,45 @@ class ScoreNet(nn.Module):
         -------
         yhat : (total_N,)  refined seizure probabilities
         """
+        total_N = Z.shape[1]
+        device = Z.device
+
         candidate = torch.sigmoid(self.a1 @ Z + self.b1)   # (total_N,)
         score = torch.tanh(self.a2 @ Z + self.b2)           # (total_N,)
 
-        yhat = torch.zeros_like(candidate)
-        offset = 0
-        for n in n_samples:
-            c_rec = candidate[offset:offset + n]
-            s_rec = score[offset:offset + n]
+        binary = (candidate >= self.gamma).long()
 
-            binary = (c_rec >= self.gamma).long()
-            groups = _find_groups(binary)
+        # Mark where a new group starts: value change OR record boundary
+        value_change = torch.zeros(total_N, dtype=torch.bool, device=device)
+        value_change[0] = True
+        value_change[1:] = binary[1:] != binary[:-1]
 
-            for start, end_ in groups:
-                group_scores = s_rec[start:end_]
-                group_size = end_ - start
-                o_l = torch.sigmoid(
-                    self.a3 * group_scores.sum() / group_size + self.b3)
-                yhat[offset + start:offset + end_] = torch.sigmoid(
-                    self.a4 * c_rec[start:end_] * o_l + self.b4)
+        rec_starts = torch.zeros(total_N, dtype=torch.bool, device=device)
+        offsets = torch.tensor(
+            np.cumsum([0] + list(n_samples[:-1])),
+            dtype=torch.long, device=device,
+        )
+        rec_starts[offsets] = True
 
-            offset += n
+        new_group = value_change | rec_starts
+        group_ids = new_group.long().cumsum(0) - 1          # 0-based IDs
+        n_groups = group_ids[-1].item() + 1
 
+        # Per-group mean score via scatter
+        ones = torch.ones(total_N, device=device)
+        g_sum = torch.zeros(n_groups, device=device).scatter_add_(0, group_ids, score)
+        g_cnt = torch.zeros(n_groups, device=device).scatter_add_(0, group_ids, ones)
+        g_mean = g_sum / g_cnt
+
+        # Output gate expanded to per-element
+        o_l = torch.sigmoid(self.a3 * g_mean[group_ids] + self.b3)
+
+        yhat = torch.sigmoid(self.a4 * candidate * o_l + self.b4)
         return yhat
 
 
-def _find_groups(binary):
-    """Find (start, end) of all contiguous same-value runs in a 1-D tensor.
-
-    Returns groups for BOTH 0-runs and 1-runs, matching the MATLAB code
-    which groups both seizure candidates and normal epochs.
-    """
-    if len(binary) == 0:
-        return []
-    groups = []
-    start = 0
-    for i in range(1, len(binary)):
-        if binary[i] != binary[start]:
-            groups.append((start, i))
-            start = i
-    groups.append((start, len(binary)))
-    return groups
-
-
 # ---------------------------------------------------------------------------
-#  Toeplitz matrix construction
+#  Toeplitz matrix construction  (vectorised — no Python loop)
 # ---------------------------------------------------------------------------
 
 def build_toeplitz(z, w):
@@ -111,10 +108,8 @@ def build_toeplitz(z, w):
     n = len(z)
     filt_len = 2 * w + 1
     padded = np.concatenate([np.zeros(w, dtype=z.dtype), z, np.zeros(w, dtype=z.dtype)])
-    Z = np.zeros((filt_len, n), dtype=z.dtype)
-    for i in range(n):
-        Z[:, i] = padded[i:i + filt_len]
-    return Z
+    idx = np.arange(n)[None, :] + np.arange(filt_len)[:, None]   # (filt_len, n)
+    return padded[idx]
 
 
 # ---------------------------------------------------------------------------
