@@ -25,11 +25,11 @@ from sklearn.metrics import (
 
 from scorenet import (
     ScoreNet, ProbSequenceDataset, collate_fn,
-    log_dice_loss, build_toeplitz,
+    log_dice_loss, combined_loss, weighted_bce_loss, build_toeplitz,
 )
 
 
-def run_inference(model, loader, device):
+def run_inference(model, loader, device, loss_fn):
     """Run ScoreNet on a dataloader, return flat refined probs, targets,
     and the mean loss."""
     model.eval()
@@ -43,7 +43,7 @@ def run_inference(model, loader, device):
             labels = labels.to(device)
             yhat = model(Z, n_samples)
 
-            total_loss += log_dice_loss(yhat, labels).item()
+            total_loss += loss_fn(yhat, labels).item()
             n_batches += 1
 
             all_probs.append(yhat.cpu().numpy())
@@ -100,6 +100,13 @@ def main():
     parser.add_argument('--max_len', default=5000, type=int,
                         help='Max sub-sequence length per chunk (prevents single-group '
                              'collapse on long TUSZ recordings; use 0 for full patient)')
+    parser.add_argument('--loss', default='combined', type=str,
+                        choices=['log_dice', 'combined', 'bce'],
+                        help='Loss function: log_dice | combined | bce')
+    parser.add_argument('--pos_weight', default=17.0, type=float,
+                        help='Positive class weight for BCE / combined loss')
+    parser.add_argument('--alpha', default=0.3, type=float,
+                        help='Dice weight in combined loss (1-alpha for BCE)')
     parser.add_argument('--threshold', default=0.5, type=float,
                         help='Threshold for point-wise eval')
     parser.add_argument('--device', default='cuda', type=str)
@@ -132,6 +139,14 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"ScoreNet parameters: {n_params}")
 
+    if args.loss == 'log_dice':
+        loss_fn = lambda yh, y: log_dice_loss(yh, y)
+    elif args.loss == 'bce':
+        loss_fn = lambda yh, y: weighted_bce_loss(yh, y, pos_weight=args.pos_weight)
+    else:
+        loss_fn = lambda yh, y: combined_loss(yh, y, pos_weight=args.pos_weight, alpha=args.alpha)
+    print(f"Loss: {args.loss} (pos_weight={args.pos_weight}, alpha={args.alpha})")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-5)
@@ -150,7 +165,7 @@ def main():
             labels = labels.to(device)
 
             yhat = model(Z, n_samples)
-            loss = log_dice_loss(yhat, labels)
+            loss = loss_fn(yhat, labels)
 
             optimizer.zero_grad()
             loss.backward()
@@ -164,7 +179,7 @@ def main():
         avg_train_loss = train_loss / max(n_batches, 1)
 
         val_probs, val_targets, avg_val_loss = run_inference(
-            model, val_loader, device)
+            model, val_loader, device, loss_fn)
         pw = compute_pointwise_metrics(
             val_probs, val_targets, threshold=args.threshold)
 

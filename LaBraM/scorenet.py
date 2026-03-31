@@ -113,7 +113,7 @@ def build_toeplitz(z, w):
 
 
 # ---------------------------------------------------------------------------
-#  Loss  (Eq. 7 of the paper)
+#  Losses
 # ---------------------------------------------------------------------------
 
 def log_dice_loss(yhat, y, eps=1e-7):
@@ -121,12 +121,6 @@ def log_dice_loss(yhat, y, eps=1e-7):
 
     Uses log-transformed proxies for TP, FP, FN and ignores TN,
     naturally handling class imbalance.
-
-    Parameters
-    ----------
-    yhat : Tensor, values in (0, 1)
-    y    : Tensor, binary labels {0, 1}
-    eps  : small constant for numerical stability
     """
     yhat = yhat.clamp(eps, 1.0 - eps)
     log_1_minus_yhat = torch.log(1.0 - yhat)
@@ -139,6 +133,35 @@ def log_dice_loss(yhat, y, eps=1e-7):
 
     loss = 1.0 - 2.0 * intersec / (union + eps)
     return loss
+
+
+def dice_loss(yhat, y, eps=1e-7):
+    """Standard soft Dice loss."""
+    yhat = yhat.clamp(eps, 1.0 - eps)
+    intersection = (y * yhat).sum()
+    return 1.0 - 2.0 * intersection / (y.sum() + yhat.sum() + eps)
+
+
+def weighted_bce_loss(yhat, y, pos_weight=1.0, eps=1e-7):
+    """Binary cross-entropy with per-class weighting."""
+    yhat = yhat.clamp(eps, 1.0 - eps)
+    w = torch.where(y == 1, pos_weight, 1.0)
+    return -(w * (y * torch.log(yhat) + (1.0 - y) * torch.log(1.0 - yhat))).mean()
+
+
+def combined_loss(yhat, y, pos_weight=17.0, alpha=0.3, eps=1e-7):
+    """Dice + weighted BCE.  BCE provides strong per-window gradients even when
+    the model is only moderately discriminative; Dice handles class imbalance
+    once discrimination improves.
+
+    Parameters
+    ----------
+    yhat : Tensor, values in (0, 1)
+    y    : Tensor, binary labels {0, 1}
+    pos_weight : float  — upweight for the seizure (minority) class in BCE
+    alpha : float — weight of the Dice component (1-alpha for BCE)
+    """
+    return alpha * dice_loss(yhat, y, eps) + (1.0 - alpha) * weighted_bce_loss(yhat, y, pos_weight, eps)
 
 
 # ---------------------------------------------------------------------------
