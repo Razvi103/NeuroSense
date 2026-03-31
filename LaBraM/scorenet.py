@@ -75,6 +75,18 @@ def log_dice_loss(pred, target, smooth=1.0):
     return -torch.log(dice)
 
 
+def combined_loss(pred, target, alpha=0.5, smooth=1.0):
+    """Dice + BCE combined loss.
+
+    BCE provides strong per-sample gradients that break the initial
+    symmetry (all outputs ~0.5), while dice handles class imbalance
+    once training is underway.
+    """
+    dice = log_dice_loss(pred, target, smooth=smooth)
+    bce = nn.functional.binary_cross_entropy(pred, target)
+    return alpha * dice + (1.0 - alpha) * bce
+
+
 # ---------------------------------------------------------------------------
 #  Dataset
 # ---------------------------------------------------------------------------

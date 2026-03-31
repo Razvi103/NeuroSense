@@ -15,9 +15,15 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from sklearn.metrics import (
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    confusion_matrix,
+)
 
-from scorenet import ScoreNet, ProbSequenceDataset, collate_fn, log_dice_loss
-from evaluate_checkpoint import get_events, compute_event_metrics
+from scorenet import ScoreNet, ProbSequenceDataset, collate_fn, combined_loss
 
 
 def run_inference(model, loader, device):
@@ -35,7 +41,7 @@ def run_inference(model, loader, device):
             refined = model(seqs, lengths)
 
             mask = targets >= 0
-            total_loss += log_dice_loss(refined[mask], targets[mask]).item()
+            total_loss += combined_loss(refined[mask], targets[mask]).item()
             n_batches += 1
 
             for i, length in enumerate(lengths):
@@ -49,17 +55,37 @@ def run_inference(model, loader, device):
     )
 
 
-def evaluate_event_f1(probs, targets, threshold=0.5, min_dur=10):
-    """Threshold refined probs, apply min-duration filter, compute event F1."""
+def compute_pointwise_metrics(probs, targets, threshold=0.5):
+    """Compute point-wise precision, recall, F1, ROC-AUC, sensitivity,
+    specificity from flat probability and label arrays."""
     preds = (probs >= threshold).astype(int)
+    y_true = targets.astype(int)
 
-    events = get_events(preds)
-    for s, e in events:
-        if (e - s) < min_dur:
-            preds[s:e] = 0
+    cm = confusion_matrix(y_true, preds, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
 
-    metrics = compute_event_metrics(targets.astype(int), preds)
-    return metrics, preds
+    precision = precision_score(y_true, preds, zero_division=0)
+    recall = recall_score(y_true, preds, zero_division=0)
+    f1 = f1_score(y_true, preds, zero_division=0)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+    try:
+        auc = roc_auc_score(y_true, probs)
+    except ValueError:
+        auc = 0.0
+
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'roc_auc': auc,
+        'sensitivity': recall,
+        'specificity': specificity,
+        'tp': int(tp),
+        'fp': int(fp),
+        'fn': int(fn),
+        'tn': int(tn),
+    }
 
 
 def main():
@@ -75,8 +101,8 @@ def main():
     parser.add_argument('--max_len', default=4096, type=int,
                         help='Max sub-sequence length for chunking')
     parser.add_argument('--threshold', default=0.5, type=float)
-    parser.add_argument('--min_dur_sec', default=10, type=int,
-                        help='Min event duration for validation eval (seconds/windows)')
+    parser.add_argument('--alpha', default=0.5, type=float,
+                        help='Weight for dice in combined loss (1-alpha for BCE)')
     parser.add_argument('--device', default='cuda', type=str)
     args = parser.parse_args()
 
@@ -127,7 +153,7 @@ def main():
 
             refined = model(seqs, lengths)
             mask = targets >= 0
-            loss = log_dice_loss(refined[mask], targets[mask])
+            loss = combined_loss(refined[mask], targets[mask], alpha=args.alpha)
 
             optimizer.zero_grad()
             loss.backward()
@@ -142,50 +168,51 @@ def main():
 
         val_probs, val_targets, avg_val_loss = run_inference(
             model, val_loader, device)
-        val_metrics, _ = evaluate_event_f1(
-            val_probs, val_targets,
-            threshold=args.threshold, min_dur=args.min_dur_sec)
+        pw = compute_pointwise_metrics(
+            val_probs, val_targets, threshold=args.threshold)
 
         record = {
             'epoch': epoch,
             'train_loss': avg_train_loss,
             'val_loss': avg_val_loss,
-            'val_event_f1': val_metrics['F1'],
-            'val_event_precision': val_metrics['Precision'],
-            'val_event_recall': val_metrics['Recall'],
-            'val_fp': val_metrics['FP'],
-            'val_far_hr': val_metrics['FAR/hr'],
+            'val_f1': pw['f1'],
+            'val_precision': pw['precision'],
+            'val_recall': pw['recall'],
+            'val_roc_auc': pw['roc_auc'],
+            'val_sensitivity': pw['sensitivity'],
+            'val_specificity': pw['specificity'],
             'lr': optimizer.param_groups[0]['lr'],
         }
         history.append(record)
 
-        improved = val_metrics['F1'] > best_val_f1
+        improved = pw['f1'] > best_val_f1
         if improved:
-            best_val_f1 = val_metrics['F1']
+            best_val_f1 = pw['f1']
             ckpt_path = os.path.join(args.output_dir, 'scorenet_best.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_event_f1': best_val_f1,
+                'val_f1': best_val_f1,
                 'args': vars(args),
             }, ckpt_path)
 
         star = ' *' if improved else ''
         print(f"Epoch {epoch:3d} | "
-              f"train_loss {avg_train_loss:.4f} | "
-              f"val_loss {avg_val_loss:.4f} | "
-              f"event_F1 {val_metrics['F1']:.4f} | "
-              f"event_P {val_metrics['Precision']:.4f} | "
-              f"event_R {val_metrics['Recall']:.4f} | "
-              f"FP {val_metrics['FP']} | "
-              f"FAR/hr {val_metrics['FAR/hr']:.3f}"
+              f"train {avg_train_loss:.4f} | "
+              f"val {avg_val_loss:.4f} | "
+              f"F1 {pw['f1']:.4f} | "
+              f"P {pw['precision']:.4f} | "
+              f"R {pw['recall']:.4f} | "
+              f"AUC {pw['roc_auc']:.4f} | "
+              f"Sens {pw['sensitivity']:.4f} | "
+              f"Spec {pw['specificity']:.4f}"
               f"{star}")
 
     log_path = os.path.join(args.output_dir, 'training_log.json')
     with open(log_path, 'w') as f:
         json.dump(history, f, indent=2)
-    print(f"\nBest val event F1: {best_val_f1:.4f}")
+    print(f"\nBest val F1: {best_val_f1:.4f}")
     print(f"Checkpoint: {os.path.join(args.output_dir, 'scorenet_best.pth')}")
     print(f"Log: {log_path}")
 

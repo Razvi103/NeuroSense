@@ -198,9 +198,10 @@ def load_scorenet(ckpt_path, device):
     )
     net.load_state_dict(ckpt['model_state_dict'])
     net.to(device).eval()
+    val_f1 = ckpt.get('val_f1', ckpt.get('val_event_f1', '?'))
+    f1_str = f"{val_f1:.4f}" if isinstance(val_f1, float) else str(val_f1)
     print(f"Loaded ScoreNet from {ckpt_path} "
-          f"(epoch {ckpt.get('epoch', '?')}, "
-          f"val_event_F1={ckpt.get('val_event_f1', '?'):.4f})")
+          f"(epoch {ckpt.get('epoch', '?')}, val_F1={f1_str})")
     return net
 
 
