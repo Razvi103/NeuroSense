@@ -1,20 +1,25 @@
 """
-ScoreNet: a lightweight BiLSTM postprocessor that refines per-window seizure
+ScoreNet: a lightweight postprocessor that refines per-window seizure
 probabilities produced by a frozen upstream detector.
 
-References
-----------
-Ilyas et al., "ScoreNet: A Neural Network-Based Post-Processing Model for
-Identifying Epileptic Seizure Onset and Offset in EEGs", IEEE TNSRE 2022.
+Faithful reimplementation of:
+    Boonyakitanont et al., "ScoreNet: A Neural Network-Based Post-Processing
+    Model for Identifying Epileptic Seizure Onset and Offset in EEGs",
+    IEEE TNSRE 2021.
 
-The log-dice loss (a differentiable F1 proxy) is taken from the same paper.
+Architecture (Equations 1-4 of the paper):
+    candidate  c_i = sigmoid(a1^T z_i + b1)        -- 1D conv, size 2w+1
+    score      s_i = tanh(a2^T z_i + b2)            -- 1D conv, size 2w+1
+    output gate o_l = sigmoid(a3/N_l sum(s_j) + b3)  -- per group
+    final      yhat_i = sigmoid(a4 * c_i * o_l + b4) -- per epoch
+
+Total learnable parameters: 2*(2w+1) + 6 = 32 when w=6.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
 
 # ---------------------------------------------------------------------------
@@ -22,69 +27,123 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 # ---------------------------------------------------------------------------
 
 class ScoreNet(nn.Module):
-    """2-layer BiLSTM that maps a probability sequence to a refined one."""
+    """ScoreNet onset-offset detector (32 parameters for w=6)."""
 
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.2):
+    def __init__(self, w=6, gamma=0.5):
         super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-        )
-        self.fc = nn.Linear(hidden_dim * 2, 1)
+        self.w = w
+        self.gamma = gamma
+        filter_len = 2 * w + 1
 
-    def forward(self, x, lengths=None):
+        self.a1 = nn.Parameter(torch.ones(filter_len))
+        self.b1 = nn.Parameter(torch.tensor(-1.0))
+        self.a2 = nn.Parameter(torch.ones(filter_len))
+        self.b2 = nn.Parameter(torch.tensor(-2.0))
+        self.a3 = nn.Parameter(torch.tensor(3.0))
+        self.b3 = nn.Parameter(torch.tensor(0.0))
+        self.a4 = nn.Parameter(torch.tensor(3.0))
+        self.b4 = nn.Parameter(torch.tensor(-1.0))
+
+    def forward(self, Z, n_samples):
         """
         Parameters
         ----------
-        x : (B, T, 1)  padded probability sequences
-        lengths : (B,)  original lengths before padding (optional)
+        Z : (filter_len, total_N) Toeplitz input matrix (all records concat)
+        n_samples : list[int]  lengths of each record within Z
 
         Returns
         -------
-        out : (B, T, 1)  refined probabilities in [0, 1]
+        yhat : (total_N,)  refined seizure probabilities
         """
-        if lengths is not None:
-            packed = pack_padded_sequence(
-                x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-            lstm_out, _ = self.lstm(packed)
-            lstm_out, _ = pad_packed_sequence(lstm_out, batch_first=True)
-        else:
-            lstm_out, _ = self.lstm(x)
+        candidate = torch.sigmoid(self.a1 @ Z + self.b1)   # (total_N,)
+        score = torch.tanh(self.a2 @ Z + self.b2)           # (total_N,)
 
-        return torch.sigmoid(self.fc(lstm_out))
+        yhat = torch.zeros_like(candidate)
+        offset = 0
+        for n in n_samples:
+            c_rec = candidate[offset:offset + n]
+            s_rec = score[offset:offset + n]
+
+            binary = (c_rec >= self.gamma).long()
+            groups = _find_groups(binary)
+
+            for start, end_ in groups:
+                group_scores = s_rec[start:end_]
+                group_size = end_ - start
+                o_l = torch.sigmoid(
+                    self.a3 * group_scores.sum() / group_size + self.b3)
+                yhat[offset + start:offset + end_] = torch.sigmoid(
+                    self.a4 * c_rec[start:end_] * o_l + self.b4)
+
+            offset += n
+
+        return yhat
+
+
+def _find_groups(binary):
+    """Find (start, end) of all contiguous same-value runs in a 1-D tensor.
+
+    Returns groups for BOTH 0-runs and 1-runs, matching the MATLAB code
+    which groups both seizure candidates and normal epochs.
+    """
+    if len(binary) == 0:
+        return []
+    groups = []
+    start = 0
+    for i in range(1, len(binary)):
+        if binary[i] != binary[start]:
+            groups.append((start, i))
+            start = i
+    groups.append((start, len(binary)))
+    return groups
 
 
 # ---------------------------------------------------------------------------
-#  Loss
+#  Toeplitz matrix construction
 # ---------------------------------------------------------------------------
 
-def log_dice_loss(pred, target, smooth=1.0):
-    """Differentiable F1 proxy (log-dice).
+def build_toeplitz(z, w):
+    """Build the (2w+1, N) Toeplitz input matrix from a 1-D prob array.
 
-    Both *pred* and *target* should have the same shape and contain
-    values in [0, 1].  Padding positions must be masked out before
-    calling this function.
+    Column i contains (z_{i-w}, ..., z_i, ..., z_{i+w}) with zero-padding
+    at boundaries, matching the MATLAB reference implementation.
     """
-    intersection = (pred * target).sum()
-    union = pred.sum() + target.sum()
-    dice = (2.0 * intersection + smooth) / (union + smooth)
-    return -torch.log(dice)
+    n = len(z)
+    filt_len = 2 * w + 1
+    padded = np.concatenate([np.zeros(w, dtype=z.dtype), z, np.zeros(w, dtype=z.dtype)])
+    Z = np.zeros((filt_len, n), dtype=z.dtype)
+    for i in range(n):
+        Z[:, i] = padded[i:i + filt_len]
+    return Z
 
 
-def combined_loss(pred, target, alpha=0.5, smooth=1.0):
-    """Dice + BCE combined loss.
+# ---------------------------------------------------------------------------
+#  Loss  (Eq. 7 of the paper)
+# ---------------------------------------------------------------------------
 
-    BCE provides strong per-sample gradients that break the initial
-    symmetry (all outputs ~0.5), while dice handles class imbalance
-    once training is underway.
+def log_dice_loss(yhat, y, eps=1e-7):
+    """Log-dice loss from Eq. 7 of the ScoreNet paper.
+
+    Uses log-transformed proxies for TP, FP, FN and ignores TN,
+    naturally handling class imbalance.
+
+    Parameters
+    ----------
+    yhat : Tensor, values in (0, 1)
+    y    : Tensor, binary labels {0, 1}
+    eps  : small constant for numerical stability
     """
-    dice = log_dice_loss(pred, target, smooth=smooth)
-    bce = nn.functional.binary_cross_entropy(pred, target)
-    return alpha * dice + (1.0 - alpha) * bce
+    yhat = yhat.clamp(eps, 1.0 - eps)
+    log_1_minus_yhat = torch.log(1.0 - yhat)
+    log_yhat = torch.log(yhat)
+
+    intersec = (y * log_1_minus_yhat).sum()
+    union = (2.0 * y * log_1_minus_yhat
+             + (1.0 - y) * log_1_minus_yhat
+             + y * log_yhat).sum()
+
+    loss = 1.0 - 2.0 * intersec / (union + eps)
+    return loss
 
 
 # ---------------------------------------------------------------------------
@@ -92,50 +151,53 @@ def combined_loss(pred, target, alpha=0.5, smooth=1.0):
 # ---------------------------------------------------------------------------
 
 class ProbSequenceDataset(Dataset):
-    """Splits a flat probability array into per-patient chunks.
+    """Per-patient probability sequences with pre-built Toeplitz matrices.
 
-    Each item is a contiguous block of predictions belonging to a single
-    patient.  Long recordings are further split into non-overlapping
-    sub-sequences of at most *max_len* windows so that batching stays
-    memory-friendly.
+    Each item is one patient's full recording (or a chunk of it),
+    stored as a Toeplitz matrix ready for ScoreNet's forward pass.
     """
 
-    def __init__(self, npz_path, max_len=4096):
+    def __init__(self, npz_path, w=6, max_len=None):
         data = np.load(npz_path)
         probs = data['probs'].astype(np.float32)
         labels = data['labels'].astype(np.float32)
         pids = data['patient_ids'].astype(np.int64)
 
-        self.sequences = []
-        self.targets = []
+        self.items = []
 
-        unique_pids = np.unique(pids)
-        for pid in unique_pids:
+        for pid in np.unique(pids):
             mask = pids == pid
             p = probs[mask]
-            l = labels[mask]
-            for start in range(0, len(p), max_len):
-                end = min(start + max_len, len(p))
-                self.sequences.append(p[start:end])
-                self.targets.append(l[start:end])
+            lab = labels[mask]
+
+            if max_len is not None and len(p) > max_len:
+                for start in range(0, len(p), max_len):
+                    end = min(start + max_len, len(p))
+                    Z = build_toeplitz(p[start:end], w)
+                    self.items.append((Z, lab[start:end], end - start))
+            else:
+                Z = build_toeplitz(p, w)
+                self.items.append((Z, lab, len(p)))
 
     def __len__(self):
-        return len(self.sequences)
+        return len(self.items)
 
     def __getitem__(self, idx):
+        Z, lab, n = self.items[idx]
         return (
-            torch.from_numpy(self.sequences[idx]).unsqueeze(-1),  # (T, 1)
-            torch.from_numpy(self.targets[idx]).unsqueeze(-1),    # (T, 1)
+            torch.from_numpy(Z),           # (filter_len, N)
+            torch.from_numpy(lab),          # (N,)
+            n,
         )
 
 
 def collate_fn(batch):
-    """Pad variable-length sequences and return lengths for packing."""
-    seqs, targets = zip(*batch)
-    lengths = torch.tensor([s.shape[0] for s in seqs], dtype=torch.long)
-    seqs_padded = pad_sequence(seqs, batch_first=True, padding_value=0.0)
-    targets_padded = pad_sequence(targets, batch_first=True, padding_value=-1.0)
-    return seqs_padded, targets_padded, lengths
+    """Concatenate variable-length Toeplitz matrices along the time axis."""
+    Zs, labels, ns = zip(*batch)
+    Z_cat = torch.cat(Zs, dim=1)                # (filter_len, sum(N))
+    labels_cat = torch.cat(labels, dim=0)        # (sum(N),)
+    n_samples = list(ns)
+    return Z_cat, labels_cat, n_samples
 
 
 # ---------------------------------------------------------------------------
@@ -150,17 +212,6 @@ def hard_constraints(preds, min_dur_sec=10):
     2021 Standardized Critical Care EEG Terminology (Hirsch et al., 2021)
     which defines an electrographic seizure as epileptiform discharges
     averaging >2.5 Hz for >= 10 s, or any evolving pattern lasting >= 10 s.
-
-    Parameters
-    ----------
-    preds : np.ndarray, shape (T,), dtype int
-        Binary predictions (0 = background, 1 = seizure).
-    min_dur_sec : int
-        Minimum event duration in windows (1 window = 1 second).
-
-    Returns
-    -------
-    filtered : np.ndarray, shape (T,), dtype int
     """
     filtered = preds.copy()
     padded = np.concatenate(([0], filtered, [0]))

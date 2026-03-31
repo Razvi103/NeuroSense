@@ -5,7 +5,7 @@ Usage:
     python train_scorenet.py \
         --data_dir ./scorenet_data \
         --output_dir ./scorenet_checkpoints \
-        --epochs 50 --lr 1e-3
+        --epochs 200 --lr 1e-2
 """
 
 import argparse
@@ -23,30 +23,31 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-from scorenet import ScoreNet, ProbSequenceDataset, collate_fn, combined_loss
+from scorenet import (
+    ScoreNet, ProbSequenceDataset, collate_fn,
+    log_dice_loss, build_toeplitz,
+)
 
 
 def run_inference(model, loader, device):
-    """Run ScoreNet on a dataloader, return flat arrays of refined probs,
-    targets, and the mean loss."""
+    """Run ScoreNet on a dataloader, return flat refined probs, targets,
+    and the mean loss."""
     model.eval()
     all_probs, all_targets = [], []
     total_loss = 0.0
     n_batches = 0
 
     with torch.no_grad():
-        for seqs, targets, lengths in loader:
-            seqs = seqs.to(device)
-            targets = targets.to(device)
-            refined = model(seqs, lengths)
+        for Z, labels, n_samples in loader:
+            Z = Z.to(device)
+            labels = labels.to(device)
+            yhat = model(Z, n_samples)
 
-            mask = targets >= 0
-            total_loss += combined_loss(refined[mask], targets[mask]).item()
+            total_loss += log_dice_loss(yhat, labels).item()
             n_batches += 1
 
-            for i, length in enumerate(lengths):
-                all_probs.append(refined[i, :length, 0].cpu().numpy())
-                all_targets.append(targets[i, :length, 0].cpu().numpy())
+            all_probs.append(yhat.cpu().numpy())
+            all_targets.append(labels.cpu().numpy())
 
     return (
         np.concatenate(all_probs),
@@ -56,8 +57,7 @@ def run_inference(model, loader, device):
 
 
 def compute_pointwise_metrics(probs, targets, threshold=0.5):
-    """Compute point-wise precision, recall, F1, ROC-AUC, sensitivity,
-    specificity from flat probability and label arrays."""
+    """Point-wise precision, recall, F1, ROC-AUC, sensitivity, specificity."""
     preds = (probs >= threshold).astype(int)
     y_true = targets.astype(int)
 
@@ -81,10 +81,7 @@ def compute_pointwise_metrics(probs, targets, threshold=0.5):
         'roc_auc': auc,
         'sensitivity': recall,
         'specificity': specificity,
-        'tp': int(tp),
-        'fp': int(fp),
-        'fn': int(fn),
-        'tn': int(tn),
+        'tp': int(tp), 'fp': int(fp), 'fn': int(fn), 'tn': int(tn),
     }
 
 
@@ -93,16 +90,17 @@ def main():
     parser.add_argument('--data_dir', default='./scorenet_data', type=str,
                         help='Directory with train.npz, val.npz from extract_probs.py')
     parser.add_argument('--output_dir', default='./scorenet_checkpoints', type=str)
-    parser.add_argument('--epochs', default=50, type=int)
-    parser.add_argument('--lr', default=1e-3, type=float)
-    parser.add_argument('--batch_size', default=32, type=int)
-    parser.add_argument('--hidden_dim', default=64, type=int)
-    parser.add_argument('--num_layers', default=2, type=int)
-    parser.add_argument('--max_len', default=4096, type=int,
-                        help='Max sub-sequence length for chunking')
-    parser.add_argument('--threshold', default=0.5, type=float)
-    parser.add_argument('--alpha', default=0.5, type=float,
-                        help='Weight for dice in combined loss (1-alpha for BCE)')
+    parser.add_argument('--epochs', default=200, type=int)
+    parser.add_argument('--lr', default=1e-2, type=float)
+    parser.add_argument('--batch_size', default=8, type=int)
+    parser.add_argument('--w', default=6, type=int,
+                        help='Half-width of conv filter (filter_len = 2w+1)')
+    parser.add_argument('--gamma', default=0.5, type=float,
+                        help='Candidate threshold (fixed)')
+    parser.add_argument('--max_len', default=None, type=int,
+                        help='Max sub-sequence length for chunking (None=full patient)')
+    parser.add_argument('--threshold', default=0.5, type=float,
+                        help='Threshold for point-wise eval')
     parser.add_argument('--device', default='cuda', type=str)
     args = parser.parse_args()
 
@@ -111,32 +109,29 @@ def main():
 
     print("Loading datasets ...")
     train_dset = ProbSequenceDataset(
-        os.path.join(args.data_dir, 'train.npz'), max_len=args.max_len)
+        os.path.join(args.data_dir, 'train.npz'),
+        w=args.w, max_len=args.max_len)
     val_dset = ProbSequenceDataset(
-        os.path.join(args.data_dir, 'val.npz'), max_len=args.max_len)
+        os.path.join(args.data_dir, 'val.npz'),
+        w=args.w, max_len=args.max_len)
 
     train_loader = DataLoader(
         train_dset, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_fn, num_workers=4, pin_memory=True)
+        collate_fn=collate_fn, num_workers=0, pin_memory=False)
     val_loader = DataLoader(
         val_dset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=4, pin_memory=True)
+        collate_fn=collate_fn, num_workers=0, pin_memory=False)
 
     print(f"  Train: {len(train_dset)} sequences")
     print(f"  Val:   {len(val_dset)} sequences")
 
-    model = ScoreNet(
-        input_dim=1,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-    ).to(device)
-
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"ScoreNet parameters: {n_params:,}")
+    model = ScoreNet(w=args.w, gamma=args.gamma).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"ScoreNet parameters: {n_params}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-6)
+        optimizer, T_max=args.epochs, eta_min=1e-5)
 
     best_val_f1 = -1.0
     history = []
@@ -146,18 +141,17 @@ def main():
         train_loss = 0.0
         n_batches = 0
 
-        for seqs, targets, lengths in tqdm(
+        for Z, labels, n_samples in tqdm(
                 train_loader, desc=f"Epoch {epoch}/{args.epochs}", leave=False):
-            seqs = seqs.to(device)
-            targets = targets.to(device)
+            Z = Z.to(device)
+            labels = labels.to(device)
 
-            refined = model(seqs, lengths)
-            mask = targets >= 0
-            loss = combined_loss(refined[mask], targets[mask], alpha=args.alpha)
+            yhat = model(Z, n_samples)
+            loss = log_dice_loss(yhat, labels)
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
             train_loss += loss.item()
@@ -192,7 +186,6 @@ def main():
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
                 'val_f1': best_val_f1,
                 'args': vars(args),
             }, ckpt_path)

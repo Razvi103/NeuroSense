@@ -19,7 +19,7 @@ import utils
 from timm.models import create_model
 import modeling_finetune
 from modeling_finetune import AdversarialNeuralTransformer
-from scorenet import ScoreNet, hard_constraints
+from scorenet import ScoreNet, hard_constraints, build_toeplitz
 
 # --- 1. Dataset Class ---
 class CHBMITDataset(Dataset):
@@ -192,13 +192,12 @@ def load_scorenet(ckpt_path, device):
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     saved_args = ckpt.get('args', {})
     net = ScoreNet(
-        input_dim=1,
-        hidden_dim=saved_args.get('hidden_dim', 64),
-        num_layers=saved_args.get('num_layers', 2),
+        w=saved_args.get('w', 6),
+        gamma=saved_args.get('gamma', 0.5),
     )
     net.load_state_dict(ckpt['model_state_dict'])
     net.to(device).eval()
-    val_f1 = ckpt.get('val_f1', ckpt.get('val_event_f1', '?'))
+    val_f1 = ckpt.get('val_f1', '?')
     f1_str = f"{val_f1:.4f}" if isinstance(val_f1, float) else str(val_f1)
     print(f"Loaded ScoreNet from {ckpt_path} "
           f"(epoch {ckpt.get('epoch', '?')}, val_F1={f1_str})")
@@ -208,8 +207,10 @@ def load_scorenet(ckpt_path, device):
 @torch.no_grad()
 def scorenet_postprocess(y_prob, scorenet_model, device, threshold=0.5, min_dur_sec=10):
     """Run ScoreNet on a flat probability array and apply hard constraints."""
-    inp = torch.from_numpy(y_prob.astype(np.float32)).unsqueeze(0).unsqueeze(-1).to(device)
-    refined = scorenet_model(inp).squeeze(0).squeeze(-1).cpu().numpy()
+    w = scorenet_model.w
+    Z = build_toeplitz(y_prob.astype(np.float32), w)
+    Z_t = torch.from_numpy(Z).to(device)
+    refined = scorenet_model(Z_t, [len(y_prob)]).cpu().numpy()
     preds = (refined >= threshold).astype(int)
     preds = hard_constraints(preds, min_dur_sec=min_dur_sec)
     return preds, refined
