@@ -13,7 +13,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import json
 import os
-from dataset_maker.dataset_chbmit import CHBMITDataset, TUSZAdversarialDataset
+from dataset_maker.dataset_chbmit import CHBMITDataset, CHBMITAdversarialDataset, TUSZAdversarialDataset
 
 from pathlib import Path
 from collections import OrderedDict
@@ -246,12 +246,18 @@ def get_dataset(args):
     metrics = []
 
     if args.dataset == 'CHBMIT':
-        train_dataset = CHBMITDataset(args.data_path + '/train.h5')
-        val_dataset   = CHBMITDataset(args.data_path + '/val.h5')
-        test_dataset  = CHBMITDataset(args.data_path + '/test.h5')
+        if getattr(args, 'adversarial', False):
+            train_dataset = CHBMITAdversarialDataset(args.data_path + '/train.h5')
+            val_dataset   = CHBMITAdversarialDataset(args.data_path + '/val.h5')
+            test_dataset  = CHBMITAdversarialDataset(args.data_path + '/test.h5')
+            args.num_patients = train_dataset.num_patients
+            print(f"Adversarial mode: {args.num_patients} patients detected")
+        else:
+            train_dataset = CHBMITDataset(args.data_path + '/train.h5')
+            val_dataset   = CHBMITDataset(args.data_path + '/val.h5')
+            test_dataset  = CHBMITDataset(args.data_path + '/test.h5')
         args.nb_classes = 1
         
-        # Mapped to standard LaBraM channels
         ch_names = [
             'F7', 'T3', 'T5', 'O1', 'F3', 'C3', 'C3', 'O1',
             'F4', 'C4', 'C4', 'O2', 'F8', 'T4', 'T6', 'O2',

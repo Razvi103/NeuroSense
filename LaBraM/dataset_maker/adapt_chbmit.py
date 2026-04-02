@@ -1,14 +1,15 @@
 import os
 import glob
 import re
+import json
 import numpy as np
 import mne
 import h5py
 import random
 from tqdm import tqdm
 
-DATA_ROOT = '/home/shadeform/work/chbmit'
-OUTPUT_DIR = './datasets/CHBMIT'
+DATA_ROOT = '/home/jovyan/extra-data/CHB-MIT_Raw'
+OUTPUT_DIR = '/home/jovyan/extra-data/CHBMIT'
 WINDOW_SIZE = 2
 STRIDE = 1
 TARGET_FREQ = 200
@@ -78,22 +79,21 @@ def get_channel_mapping(raw_channels, target_channels):
             
     return mapping, missing
 
-def process_file(edf_path, seizure_intervals, writer_dict):
+def process_file(edf_path, seizure_intervals, writer_dict, patient_int_id):
     try:
         with mne.utils.use_log_level('ERROR'): 
             raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
     except Exception as e:
         print(f"Failed to read {os.path.basename(edf_path)}: {e}")
-        return
+        return 0
 
     mapping, missing = get_channel_mapping(raw.ch_names, Standard_Channels)
     if len(missing) > 0:
-        return
+        return 0
 
     raw.pick(mapping)
     raw.reorder_channels([raw.ch_names[i] for i in range(len(mapping))])
 
-    # Filtering & Resampling
     try:
         raw.notch_filter(60.0, verbose=False)
         raw.filter(0.1, 75.0, verbose=False)
@@ -102,9 +102,8 @@ def process_file(edf_path, seizure_intervals, writer_dict):
         data = raw.get_data() * 1e6
     except Exception as e:
         print(f"Processing error in {os.path.basename(edf_path)}: {e}")
-        return
+        return 0
 
-    # Segmentation
     n_samples = data.shape[1]
     window_pts = int(WINDOW_SIZE * TARGET_FREQ)
     stride_pts = int(STRIDE * TARGET_FREQ)
@@ -128,15 +127,20 @@ def process_file(edf_path, seizure_intervals, writer_dict):
     if segments:
         dset_data = writer_dict['data']
         dset_labels = writer_dict['labels']
+        dset_pids = writer_dict['patient_ids']
         
         curr_len = dset_data.shape[0]
         add_len = len(segments)
         
         dset_data.resize(curr_len + add_len, axis=0)
         dset_labels.resize(curr_len + add_len, axis=0)
+        dset_pids.resize(curr_len + add_len, axis=0)
         
         dset_data[curr_len:] = np.array(segments, dtype=np.float32)
         dset_labels[curr_len:] = np.array(labels, dtype=np.int64)
+        dset_pids[curr_len:] = np.full(add_len, patient_int_id, dtype=np.int64)
+
+    return len(segments)
 
 def main():
     if not os.path.exists(OUTPUT_DIR):
@@ -163,6 +167,8 @@ def main():
             patient_map[pid].append((edf, intervals))
 
     all_patients = list(patient_map.keys())
+    patient_to_int = {pid: i for i, pid in enumerate(sorted(all_patients))}
+    print(f"Total unique patients: {len(patient_to_int)}")
     
     n_patients = len(all_patients)
     n_train = int(n_patients * 0.8)
@@ -174,23 +180,49 @@ def main():
     
     print(f"Patients -> Train: {len(train_pids)} | Val: {len(val_pids)} | Test: {len(test_pids)}")
     
-    splits = {'train': [], 'val': [], 'test': []}
-    for pid in train_pids: splits['train'].extend(patient_map[pid])
-    for pid in val_pids: splits['val'].extend(patient_map[pid])
-    for pid in test_pids: splits['test'].extend(patient_map[pid])
+    splits = {
+        'train': [(pid, edf, intervals) for pid in train_pids for edf, intervals in patient_map[pid]],
+        'val':   [(pid, edf, intervals) for pid in val_pids   for edf, intervals in patient_map[pid]],
+        'test':  [(pid, edf, intervals) for pid in test_pids  for edf, intervals in patient_map[pid]],
+    }
+
+    window_pts = int(WINDOW_SIZE * TARGET_FREQ)
 
     for split_name, files in splits.items():
-        print(f"Processing {split_name} set ({len(files)} files)...")
+        print(f"\nProcessing {split_name} set ({len(files)} files)...")
         h5_path = os.path.join(OUTPUT_DIR, f'{split_name}.h5')
+        total_segments = 0
         
         with h5py.File(h5_path, 'w') as f:
-            f.create_dataset('data', shape=(0, 23, int(WINDOW_SIZE*TARGET_FREQ)), 
-                             maxshape=(None, 23, int(WINDOW_SIZE*TARGET_FREQ)), dtype='float32')
-            f.create_dataset('labels', shape=(0,), maxshape=(None,), dtype='int64')
-            
-            writer = {'data': f['data'], 'labels': f['labels']}
-            for edf, intervals in tqdm(files):
-                process_file(edf, intervals, writer)
+            f.create_dataset('data', shape=(0, 23, window_pts),
+                             maxshape=(None, 23, window_pts), dtype='float32',
+                             chunks=(64, 23, window_pts))
+            f.create_dataset('labels', shape=(0,), maxshape=(None,),
+                             dtype='int64', chunks=(64,))
+            f.create_dataset('patient_ids', shape=(0,), maxshape=(None,),
+                             dtype='int64', chunks=(64,))
+
+            f.attrs['patient_to_int'] = json.dumps(patient_to_int)
+
+            writer = {
+                'data': f['data'],
+                'labels': f['labels'],
+                'patient_ids': f['patient_ids'],
+            }
+            for pid, edf, intervals in tqdm(files, desc=split_name):
+                n = process_file(edf, intervals, writer, patient_to_int[pid])
+                total_segments += n
+
+            total_seizure = int(np.sum(f['labels'][:]))
+            unique_patients = len(set(f['patient_ids'][:].tolist()))
+
+        print(f"  Total segments: {total_segments}")
+        print(f"  Seizure segments: {total_seizure}  "
+              f"({100*total_seizure/max(total_segments,1):.2f}%)")
+        print(f"  Unique patients: {unique_patients}")
+        print(f"  Saved to {h5_path}")
+
+    print("\nDone.")
 
 if __name__ == '__main__':
     main()
