@@ -85,7 +85,7 @@ def post_process_probs(probs, t_high, t_low, smooth_window, min_duration):
     return final_preds
 
 def compute_event_metrics(y_true, y_pred, stride_sec=1.0):
-    """Computes event-level metrics."""
+    """Computes event-level metrics (original any-overlap, no tolerances)."""
     true_events = get_events(y_true)
     pred_events = get_events(y_pred)
     
@@ -129,6 +129,121 @@ def compute_event_metrics(y_true, y_pred, stride_sec=1.0):
         "Precision": precision,
         "F1": f1,
         "FAR/hr": far_per_hour
+    }
+
+
+# ---------------------------------------------------------------------------
+# SzCORE-compliant event-based scoring
+# ---------------------------------------------------------------------------
+
+def _apply_tolerances(events, pre_ictal_samples, post_ictal_samples, total_len):
+    """Widen reference events by pre/post-ictal tolerance (in sample indices)."""
+    widened = []
+    for s, e in events:
+        new_s = max(0, s - pre_ictal_samples)
+        new_e = min(total_len, e + post_ictal_samples)
+        widened.append((new_s, new_e))
+    return widened
+
+
+def _merge_close_events(events, gap_samples):
+    """Merge events separated by fewer than *gap_samples* into one."""
+    if not events:
+        return []
+    sorted_ev = sorted(events, key=lambda x: x[0])
+    merged = [sorted_ev[0]]
+    for s, e in sorted_ev[1:]:
+        prev_s, prev_e = merged[-1]
+        if s - prev_e < gap_samples:
+            merged[-1] = (prev_s, max(prev_e, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _split_long_events(events, max_samples):
+    """Split events longer than *max_samples* into consecutive chunks."""
+    split = []
+    for s, e in events:
+        while e - s > max_samples:
+            split.append((s, s + max_samples))
+            s = s + max_samples
+        if e > s:
+            split.append((s, e))
+    return split
+
+
+def compute_szcore_event_metrics(
+    y_true,
+    y_pred,
+    stride_sec=1.0,
+    pre_ictal_sec=30.0,
+    post_ictal_sec=60.0,
+    merge_gap_sec=90.0,
+    max_event_sec=300.0,
+):
+    """SzCORE-compliant event-based metrics.
+
+    Applies the full SzCORE preprocessing pipeline before any-overlap matching:
+      1. Convert raw binary arrays to event lists.
+      2. Widen reference events by pre/post-ictal tolerances.
+      3. Merge reference and predicted events closer than *merge_gap_sec*.
+      4. Split events longer than *max_event_sec*.
+      5. Any-overlap matching between reference and predicted events.
+
+    Returns the same dict keys as ``compute_event_metrics`` plus ``FAR/day``.
+    """
+    total_len = len(y_true)
+
+    pre_samples = int(round(pre_ictal_sec / stride_sec))
+    post_samples = int(round(post_ictal_sec / stride_sec))
+    gap_samples = int(round(merge_gap_sec / stride_sec))
+    max_samples = int(round(max_event_sec / stride_sec))
+
+    ref_events = get_events(y_true)
+    hyp_events = get_events(y_pred)
+
+    ref_events = _apply_tolerances(ref_events, pre_samples, post_samples, total_len)
+    ref_events = _merge_close_events(ref_events, gap_samples)
+    ref_events = _split_long_events(ref_events, max_samples)
+
+    hyp_events = _merge_close_events(hyp_events, gap_samples)
+    hyp_events = _split_long_events(hyp_events, max_samples)
+
+    tp_events = 0
+    fn_events = 0
+    fp_events = 0
+
+    for rs, re_ in ref_events:
+        detected = any(max(rs, ps) < min(re_, pe) for ps, pe in hyp_events)
+        if detected:
+            tp_events += 1
+        else:
+            fn_events += 1
+
+    for ps, pe in hyp_events:
+        matched = any(max(ps, rs) < min(pe, re_) for rs, re_ in ref_events)
+        if not matched:
+            fp_events += 1
+
+    sensitivity = tp_events / len(ref_events) if ref_events else 0.0
+    precision = tp_events / (tp_events + fp_events) if (tp_events + fp_events) > 0 else 0.0
+    f1 = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0.0
+
+    total_hours = total_len * stride_sec / 3600.0
+    far_per_hour = fp_events / total_hours if total_hours > 0 else 0.0
+    far_per_day = far_per_hour * 24.0
+
+    return {
+        "Total Seizures (ref)": len(ref_events),
+        "TP": tp_events,
+        "FN": fn_events,
+        "FP": fp_events,
+        "Sensitivity": sensitivity,
+        "Precision": precision,
+        "F1": f1,
+        "FAR/hr": far_per_hour,
+        "FAR/day": far_per_day,
     }
 
 CHBMIT_CH_NAMES = [
@@ -292,7 +407,7 @@ def run_eval(args):
     print(f"AUROC:                {roc_auc:.4f}")
     print(f"Confusion Matrix:     [TN={tn}, FP={fp}, FN={fn}, TP={tp}]")
 
-    print("\n--- Event-Based Metrics ---")
+    print("\n--- Event-Based Metrics (strict, no tolerances) ---")
     pp_evt = compute_event_metrics(y_true, y_pred_pp)
     
     print(f"Total Seizures (GT): {pp_evt['Total Seizures']}")
@@ -302,6 +417,29 @@ def run_eval(args):
     print(f"False Alarms/Hr:     {pp_evt['FAR/hr']:.4f}")
     print(f"Event Precision:     {pp_evt['Precision']:.4f}")
     print(f"Event F1:            {pp_evt['F1']:.4f}")
+
+    print(f"\n--- SzCORE Event-Based Metrics ---")
+    print(f"Params: pre_ictal={args.szcore_pre_ictal}s, "
+          f"post_ictal={args.szcore_post_ictal}s, "
+          f"merge_gap={args.szcore_merge_gap}s, "
+          f"max_event={args.szcore_max_event}s")
+    szcore_evt = compute_szcore_event_metrics(
+        y_true, y_pred_pp,
+        stride_sec=1.0,
+        pre_ictal_sec=args.szcore_pre_ictal,
+        post_ictal_sec=args.szcore_post_ictal,
+        merge_gap_sec=args.szcore_merge_gap,
+        max_event_sec=args.szcore_max_event,
+    )
+    print(f"Total Events (ref):  {szcore_evt['Total Seizures (ref)']}")
+    print(f"Detected (TP):       {szcore_evt['TP']} \t({szcore_evt['Sensitivity']*100:.1f}%)")
+    print(f"Missed (FN):         {szcore_evt['FN']}")
+    print(f"False Alarms (FP):   {szcore_evt['FP']}")
+    print(f"Sensitivity:         {szcore_evt['Sensitivity']:.4f}")
+    print(f"Precision:           {szcore_evt['Precision']:.4f}")
+    print(f"F1:                  {szcore_evt['F1']:.4f}")
+    print(f"FAR/hr:              {szcore_evt['FAR/hr']:.4f}")
+    print(f"FAR/day:             {szcore_evt['FAR/day']:.4f}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -328,6 +466,16 @@ if __name__ == '__main__':
                         help='Threshold for ScoreNet refined probabilities')
     parser.add_argument('--sn_min_dur', default=10, type=int,
                         help='Min event duration in seconds (ACNS: >=10s)')
+
+    # SzCORE event-based scoring parameters
+    parser.add_argument('--szcore_pre_ictal', default=30.0, type=float,
+                        help='Pre-ictal tolerance in seconds (default: 30)')
+    parser.add_argument('--szcore_post_ictal', default=60.0, type=float,
+                        help='Post-ictal tolerance in seconds (default: 60)')
+    parser.add_argument('--szcore_merge_gap', default=90.0, type=float,
+                        help='Merge events closer than this gap in seconds (default: 90)')
+    parser.add_argument('--szcore_max_event', default=300.0, type=float,
+                        help='Split events longer than this in seconds (default: 300)')
 
     args = parser.parse_args()
     run_eval(args)
