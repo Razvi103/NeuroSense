@@ -90,6 +90,12 @@ def load_fold_model(ckpt_path, args, device):
         adv_hidden_dim=args.adv_hidden_dim,
         intermediate_layers=intermediate,
     )
+
+    old_head = 'seizure_head.weight' in clean and 'seizure_head.0.weight' not in clean
+    if old_head:
+        model.seizure_head = torch.nn.Linear(backbone.embed_dim, backbone.num_classes)
+        print(f"  Detected old single-layer seizure head checkpoint")
+
     model.load_state_dict(clean, strict=False)
     return model.to(device).eval()
 

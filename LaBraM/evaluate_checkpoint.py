@@ -292,6 +292,12 @@ def load_model(args, device=None):
         model = AdversarialNeuralTransformer(
             backbone, num_patients=num_patients, adv_hidden_dim=adv_hidden,
         )
+
+        old_head = 'seizure_head.weight' in clean_state and 'seizure_head.0.weight' not in clean_state
+        if old_head:
+            model.seizure_head = torch.nn.Linear(backbone.embed_dim, backbone.num_classes)
+            print("Detected old single-layer seizure head checkpoint")
+
         model.load_state_dict(clean_state, strict=False)
         print(f"Loaded adversarial model ({num_patients} patients)")
     else:
