@@ -1,0 +1,216 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480">
+  <defs>
+    <style>
+      text { font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; }
+      .title { font-size: 13px; font-weight: 600; fill: #333; }
+      .box-label { font-size: 11px; font-weight: 500; fill: #2a2a2a; }
+      .label { font-size: 9px; fill: #777; }
+      .chan { font-size: 9px; font-style: italic; fill: #555; }
+      .note { font-size: 8px; fill: #999; font-style: italic; }
+    </style>
+    <marker id="ad" markerWidth="7" markerHeight="7" refX="3.5" refY="7" orient="auto">
+      <polygon points="0,0 7,0 3.5,7" fill="#666"/>
+    </marker>
+    <marker id="ar" markerWidth="6" markerHeight="6" refX="6" refY="3" orient="auto">
+      <polygon points="0,0 6,3 0,6" fill="#666"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="480" fill="white"/>
+
+  <!-- Divider -->
+  <line x1="575" y1="15" x2="575" y2="465" stroke="#ccc" stroke-width="1" stroke-dasharray="6,4"/>
+
+  <!-- ============================================================== -->
+  <!--          (a) LEFT PANEL ? AVERAGE POOLING                      -->
+  <!-- ============================================================== -->
+  <text x="305" y="32" text-anchor="middle" class="title">Average Pooling (LaBraM)</text>
+
+  <!-- Grid: 4 rows (C1, C2, ..., Cc) x 2 cols (t1, t2) -->
+  <!-- Column headers -->
+  <text x="237" y="57" text-anchor="middle" class="label">T1</text>
+  <text x="293" y="57" text-anchor="middle" class="label">T2</text>
+  <text x="335" y="57" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <text x="374" y="57" text-anchor="middle" class="label">Tp</text>
+
+  <!-- Row C1 -->
+  <rect x="213" y="64" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <rect x="269" y="64" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="325" y="80" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="350" y="64" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="200" y="80" text-anchor="end" class="chan">C1</text>
+
+  <!-- Row C2 -->
+  <rect x="213" y="94" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <rect x="269" y="94" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="325" y="110" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="350" y="94" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="200" y="110" text-anchor="end" class="chan">C2</text>
+
+  <!-- Row C3 -->
+  <rect x="213" y="124" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <rect x="269" y="124" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="325" y="140" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="350" y="124" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="200" y="140" text-anchor="end" class="chan">C3</text>
+
+  <!-- Vertical ellipsis between C3 and Cc -->
+  <text x="237" y="163" text-anchor="middle" font-size="10" fill="#999">...</text>
+  <text x="293" y="163" text-anchor="middle" font-size="10" fill="#999">...</text>
+  <text x="374" y="163" text-anchor="middle" font-size="10" fill="#999">...</text>
+
+  <!-- Row Cc -->
+  <rect x="213" y="172" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <rect x="269" y="172" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="325" y="188" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="350" y="172" width="48" height="24" rx="3" fill="#9cbde0"/>
+  <text x="200" y="188" text-anchor="end" class="chan">Cc</text>
+
+  <!-- Grid outline (subtle) -->
+  <rect x="210" y="61" width="191" height="138" rx="4" fill="none" stroke="#bbb" stroke-width="0.6" stroke-dasharray="4,3"/>
+
+  <!-- Bracket + arrow down -->
+  <line x1="237" y1="199" x2="237" y2="212" stroke="#666" stroke-width="1"/>
+  <line x1="374" y1="199" x2="374" y2="212" stroke="#666" stroke-width="1"/>
+  <line x1="237" y1="212" x2="374" y2="212" stroke="#666" stroke-width="1"/>
+  <line x1="305" y1="212" x2="305" y2="232" stroke="#666" stroke-width="1.5" marker-end="url(#ad)"/>
+
+  <!-- Mean Pool box -->
+  <rect x="250" y="242" width="110" height="34" rx="8" fill="#edf2fb" stroke="#7390be" stroke-width="1.5"/>
+  <text x="305" y="264" text-anchor="middle" class="box-label">Mean Pool</text>
+
+  <!-- Annotation -->
+  <text x="370" y="256" class="note">All channels</text>
+  <text x="370" y="266" class="note">weighted equally</text>
+
+  <!-- Arrow -->
+  <line x1="305" y1="276" x2="305" y2="302" stroke="#666" stroke-width="1.5" marker-end="url(#ad)"/>
+
+  <!-- Representation bar -->
+  <rect x="255" y="312" width="100" height="12" rx="3" fill="#9cbde0"/>
+  <text x="305" y="338" text-anchor="middle" class="label">Pooled Representation</text>
+
+
+  <!-- ============================================================== -->
+  <!--          (b) RIGHT PANEL ? CHANNEL ATTENTION                   -->
+  <!-- ============================================================== -->
+  <text x="870" y="32" text-anchor="middle" class="title">Channel Attention (Proposed)</text>
+
+  <!-- Grid: same layout, per-channel colors -->
+  <text x="737" y="57" text-anchor="middle" class="label">T1</text>
+  <text x="793" y="57" text-anchor="middle" class="label">T2</text>
+  <text x="835" y="57" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <text x="874" y="57" text-anchor="middle" class="label">Tp</text>
+
+  <!-- Row C1 -->
+  <rect x="713" y="64" width="48" height="24" rx="3" fill="#5994d1"/>
+  <rect x="769" y="64" width="48" height="24" rx="3" fill="#5994d1"/>
+  <text x="825" y="80" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="850" y="64" width="48" height="24" rx="3" fill="#5994d1"/>
+  <text x="700" y="80" text-anchor="end" class="chan">C1</text>
+
+  <!-- Row C2 -->
+  <rect x="713" y="94" width="48" height="24" rx="3" fill="#66b38c"/>
+  <rect x="769" y="94" width="48" height="24" rx="3" fill="#66b38c"/>
+  <text x="825" y="110" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="850" y="94" width="48" height="24" rx="3" fill="#66b38c"/>
+  <text x="700" y="110" text-anchor="end" class="chan">C2</text>
+
+  <!-- Row C3 -->
+  <rect x="713" y="124" width="48" height="24" rx="3" fill="#c7855a"/>
+  <rect x="769" y="124" width="48" height="24" rx="3" fill="#c7855a"/>
+  <text x="825" y="140" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="850" y="124" width="48" height="24" rx="3" fill="#c7855a"/>
+  <text x="700" y="140" text-anchor="end" class="chan">C3</text>
+
+  <!-- Vertical ellipsis between C3 and Cc -->
+  <text x="737" y="163" text-anchor="middle" font-size="10" fill="#999">...</text>
+  <text x="793" y="163" text-anchor="middle" font-size="10" fill="#999">...</text>
+  <text x="874" y="163" text-anchor="middle" font-size="10" fill="#999">...</text>
+
+  <!-- Row Cc -->
+  <rect x="713" y="172" width="48" height="24" rx="3" fill="#946bb8"/>
+  <rect x="769" y="172" width="48" height="24" rx="3" fill="#946bb8"/>
+  <text x="825" y="188" text-anchor="middle" font-size="9" fill="#999">...</text>
+  <rect x="850" y="172" width="48" height="24" rx="3" fill="#946bb8"/>
+  <text x="700" y="188" text-anchor="end" class="chan">Cc</text>
+
+  <rect x="710" y="61" width="191" height="138" rx="4" fill="none" stroke="#bbb" stroke-width="0.6" stroke-dasharray="4,3"/>
+
+  <!-- Arrow + label -->
+  <line x1="790" y1="199" x2="790" y2="228" stroke="#666" stroke-width="1.5" marker-end="url(#ad)"/>
+  <text x="810" y="218" class="label">Avg. over time</text>
+
+  <!-- ===== Channel Vectors (z_c) ===== -->
+  <text x="748" y="246" text-anchor="middle" class="label">Channel vectors</text>
+
+  <rect x="713" y="254" width="70" height="12" rx="2" fill="#5994d1"/>
+  <text x="700" y="264" text-anchor="end" class="chan">z1</text>
+
+  <rect x="713" y="272" width="70" height="12" rx="2" fill="#66b38c"/>
+  <text x="700" y="282" text-anchor="end" class="chan">z2</text>
+
+  <rect x="713" y="290" width="70" height="12" rx="2" fill="#c7855a"/>
+  <text x="700" y="300" text-anchor="end" class="chan">z3</text>
+
+  <text x="748" y="315" text-anchor="middle" font-size="10" fill="#999">. . .</text>
+
+  <rect x="713" y="322" width="70" height="12" rx="2" fill="#946bb8"/>
+  <text x="700" y="332" text-anchor="end" class="chan">zc</text>
+
+  <!-- Arrows: channel bars ? MLP -->
+  <line x1="783" y1="260" x2="820" y2="260" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+  <line x1="783" y1="278" x2="820" y2="278" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+  <line x1="783" y1="296" x2="820" y2="296" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+  <line x1="783" y1="328" x2="820" y2="328" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+
+  <!-- MLP + Softmax box -->
+  <rect x="826" y="250" width="60" height="88" rx="6" fill="#faf3ea" stroke="#c08030" stroke-width="1"/>
+  <text x="856" y="290" text-anchor="middle" font-size="10" font-weight="500" fill="#8c5c23">MLP</text>
+  <text x="856" y="304" text-anchor="middle" font-size="8" fill="#a67040">Softmax</text>
+
+  <!-- Arrows: MLP ? weight bars -->
+  <line x1="886" y1="260" x2="920" y2="260" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+  <line x1="886" y1="278" x2="920" y2="278" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+  <line x1="886" y1="296" x2="920" y2="296" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+  <line x1="886" y1="328" x2="920" y2="328" stroke="#666" stroke-width="0.8" marker-end="url(#ar)"/>
+
+  <!-- ===== Attention Weights (varying bar widths) ===== -->
+  <text x="960" y="246" text-anchor="middle" class="label">Attention weights</text>
+
+  <rect x="926" y="254" width="44" height="12" rx="2" fill="#5994d1" opacity="0.8"/>
+  <text x="976" y="264" class="chan">a1</text>
+
+  <rect x="926" y="272" width="14" height="12" rx="2" fill="#66b38c" opacity="0.55"/>
+  <text x="946" y="282" class="chan">a2</text>
+
+  <rect x="926" y="290" width="28" height="12" rx="2" fill="#c7855a" opacity="0.65"/>
+  <text x="960" y="300" class="chan">a3</text>
+
+  <text x="950" y="315" text-anchor="middle" font-size="10" fill="#999">. . .</text>
+
+  <rect x="926" y="322" width="56" height="12" rx="2" fill="#946bb8" opacity="0.9"/>
+  <text x="988" y="332" class="chan">ac</text>
+
+  <!-- ===== Weighted Sum convergence ===== -->
+  <!-- Clean: one bracket from weight section down -->
+  <line x1="940" y1="334" x2="940" y2="348" stroke="#666" stroke-width="1"/>
+  <line x1="960" y1="334" x2="960" y2="348" stroke="#666" stroke-width="1"/>
+  <line x1="940" y1="348" x2="960" y2="348" stroke="#666" stroke-width="1"/>
+  <line x1="950" y1="348" x2="950" y2="368" stroke="#666" stroke-width="1.5" marker-end="url(#ad)"/>
+
+  <!-- Weighted Sum box -->
+  <rect x="895" y="378" width="110" height="34" rx="8" fill="#edf2fb" stroke="#7390be" stroke-width="1.5"/>
+  <text x="950" y="400" text-anchor="middle" class="box-label">Weighted Sum</text>
+
+  <!-- Annotation -->
+  <text x="1015" y="392" class="note">Learned per-channel</text>
+  <text x="1015" y="402" class="note">importance</text>
+
+  <!-- Arrow -->
+  <line x1="950" y1="412" x2="950" y2="432" stroke="#666" stroke-width="1.5" marker-end="url(#ad)"/>
+
+  <!-- Representation bar -->
+  <rect x="900" y="442" width="100" height="12" rx="3" fill="#8ca6c7"/>
+  <text x="950" y="468" text-anchor="middle" class="label">Weighted Representation</text>
+</svg>
