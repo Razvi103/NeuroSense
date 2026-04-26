@@ -8,8 +8,8 @@
       .chan { font-size: 9px; font-style: italic; fill: #555; }
       .note { font-size: 8px; fill: #999; font-style: italic; }
     </style>
-    <marker id="ad" markerWidth="7" markerHeight="7" refX="3.5" refY="7" orient="auto">
-      <polygon points="0,0 7,0 3.5,7" fill="#666"/>
+    <marker id="ad" markerWidth="8" markerHeight="8" refX="4" refY="8" orient="0">
+      <polygon points="0,0 8,0 4,8" fill="#666"/>
     </marker>
     <marker id="ar" markerWidth="6" markerHeight="6" refX="6" refY="3" orient="auto">
       <polygon points="0,0 6,3 0,6" fill="#666"/>
