@@ -45,7 +45,7 @@ from dataset_maker.dataset_chbmit import MultiPatientAdversarialDataset
 import utils
 
 from scorenet import (
-    ScoreNet, build_toeplitz, combined_loss, hard_constraints,
+    ScoreNet, build_toeplitz, log_dice_loss, hard_constraints,
 )
 
 
@@ -84,8 +84,6 @@ def get_args():
     p.add_argument('--sn_batch_size', default=32, type=int)
     p.add_argument('--sn_threshold', default=0.5, type=float)
     p.add_argument('--sn_min_dur', default=10, type=int)
-    p.add_argument('--sn_pos_weight', default=17.0, type=float)
-    p.add_argument('--sn_alpha', default=0.3, type=float)
 
     p.add_argument('--device', default='cuda', type=str)
     p.add_argument('--num_workers', default=4, type=int)
@@ -211,8 +209,7 @@ def train_scorenet_fold(train_items, args, device):
     )
 
     model = ScoreNet(w=args.sn_w, gamma=args.sn_gamma).to(device)
-    loss_fn = lambda yh, y: combined_loss(
-        yh, y, pos_weight=args.sn_pos_weight, alpha=args.sn_alpha)
+    loss_fn = log_dice_loss
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.sn_lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
