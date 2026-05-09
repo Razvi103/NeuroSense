@@ -220,7 +220,8 @@ def get_grl_lambda(epoch, total_epochs, gamma=10.0):
     return float(2.0 / (1.0 + math.exp(-gamma * p)) - 1.0)
 
 
-def train_adversarial_batch(model, samples, target, patient_ids, criterion, input_chans):
+def train_adversarial_batch(model, samples, target, patient_ids, criterion, input_chans,
+                            patient_class_weight=None):
     model_out = model(samples, input_chans)
 
     if len(model_out) == 3:
@@ -230,11 +231,12 @@ def train_adversarial_batch(model, samples, target, patient_ids, criterion, inpu
         aux_logits_dict = {}
 
     seizure_loss = criterion(seizure_logits, target)
-    patient_loss = F.cross_entropy(patient_logits, patient_ids)
+    patient_loss = F.cross_entropy(patient_logits, patient_ids, weight=patient_class_weight)
 
     aux_loss = torch.tensor(0.0, device=seizure_loss.device)
     if aux_logits_dict:
-        aux_losses = [F.cross_entropy(logits, patient_ids) for logits in aux_logits_dict.values()]
+        aux_losses = [F.cross_entropy(logits, patient_ids, weight=patient_class_weight)
+                      for logits in aux_logits_dict.values()]
         aux_loss = torch.stack(aux_losses).mean()
 
     return seizure_loss, patient_loss, aux_loss, seizure_logits
@@ -248,6 +250,7 @@ def train_one_epoch_adversarial(
     start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
     num_training_steps_per_epoch=None, update_freq=None, ch_names=None,
     is_binary=True, total_epochs=30, adv_lambda=0.1, adv_gamma=10.0,
+    patient_class_weight=None,
 ):
     input_chans = None
     if ch_names is not None:
@@ -298,11 +301,13 @@ def train_one_epoch_adversarial(
         if loss_scaler is None:
             samples = samples.half()
             seizure_loss, patient_loss, aux_loss, output = train_adversarial_batch(
-                model, samples, targets, patient_ids, criterion, input_chans)
+                model, samples, targets, patient_ids, criterion, input_chans,
+                patient_class_weight=patient_class_weight)
         else:
             with torch.amp.autocast('cuda'):
                 seizure_loss, patient_loss, aux_loss, output = train_adversarial_batch(
-                    model, samples, targets, patient_ids, criterion, input_chans)
+                    model, samples, targets, patient_ids, criterion, input_chans,
+                    patient_class_weight=patient_class_weight)
 
         adv_terms = [patient_loss]
         if aux_loss.item() > 0:

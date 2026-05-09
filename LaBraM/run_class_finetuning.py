@@ -544,6 +544,19 @@ def main(args, ds_init):
         print(f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
         exit(0)
 
+    patient_class_weight = None
+    if getattr(args, 'adversarial', False) and hasattr(dataset_train, 'h5_file'):
+        pids_arr = np.array(dataset_train.h5_file['patient_ids'])
+        num_pat = getattr(args, 'num_patients', int(pids_arr.max()) + 1)
+        pid_counts = np.bincount(pids_arr, minlength=num_pat).astype(np.float32)
+        pid_counts = np.maximum(pid_counts, 1)
+        patient_class_weight = torch.from_numpy(
+            len(pids_arr) / (num_pat * pid_counts)
+        ).to(device)
+        print(f"Patient class weights: min={patient_class_weight.min():.3f}, "
+              f"max={patient_class_weight.max():.3f}, "
+              f"mean={patient_class_weight.mean():.3f}")
+
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
@@ -562,6 +575,7 @@ def main(args, ds_init):
                 num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
                 ch_names=ch_names, is_binary=args.nb_classes == 1,
                 total_epochs=args.epochs, adv_lambda=args.adv_lambda, adv_gamma=args.adv_gamma,
+                patient_class_weight=patient_class_weight,
             )
         else:
             train_stats = train_one_epoch(
