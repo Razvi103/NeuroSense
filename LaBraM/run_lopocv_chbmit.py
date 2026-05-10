@@ -50,6 +50,7 @@ from engine_for_finetuning import train_one_epoch_adversarial, evaluate
 from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
+from evaluate_checkpoint import compute_szcore_event_metrics
 
 
 CHBMIT_CH_NAMES = [
@@ -302,6 +303,13 @@ def evaluate_fold(model, data_loader, device, ch_names, threshold=0.5):
     evt = compute_event_metrics(y_true, y_pred)
     results.update(evt)
 
+    szcore_evt = compute_szcore_event_metrics(y_true, y_pred)
+    results['szcore_evt_f1'] = szcore_evt['F1']
+    results['szcore_evt_recall'] = szcore_evt['Sensitivity']
+    results['szcore_evt_precision'] = szcore_evt['Precision']
+    results['szcore_far_per_hr'] = szcore_evt['FAR/hr']
+    results['szcore_far_per_day'] = szcore_evt['FAR/day']
+
     return results
 
 
@@ -417,6 +425,7 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
           f"F1={results['f1']:.4f}  "
           f"AUC={results['roc_auc']:.4f}  "
           f"EvtF1={results['evt_f1']:.4f}  "
+          f"ScEvF1={results['szcore_evt_f1']:.4f}  "
           f"FAR={results['far_per_hr']:.2f}/hr")
 
     train_dataset.close()
@@ -430,13 +439,17 @@ def aggregate_results(all_results, output_dir):
     metrics_keys = [
         'sensitivity', 'specificity', 'f1', 'roc_auc', 'auprc',
         'precision', 'evt_f1', 'evt_recall', 'evt_precision', 'far_per_hr',
+        'szcore_evt_f1', 'szcore_evt_recall', 'szcore_evt_precision',
+        'szcore_far_per_hr', 'szcore_far_per_day',
     ]
 
     print(f"\n{'='*80}")
     print("LOPOCV RESULTS SUMMARY")
     print(f"{'='*80}")
 
-    header = f"{'Fold':>4}  {'Patient':>7}  {'Sens':>7}  {'Spec':>7}  {'F1':>7}  {'AUC':>7}  {'EvtF1':>7}  {'FAR/hr':>7}  {'Szrs':>5}"
+    header = (f"{'Fold':>4}  {'Patient':>7}  {'Sens':>7}  {'Spec':>7}  "
+              f"{'F1':>7}  {'AUC':>7}  {'EvtF1':>7}  {'ScEvF1':>7}  "
+              f"{'FAR/hr':>7}  {'Szrs':>5}")
     print(header)
     print('-' * len(header))
 
@@ -444,14 +457,16 @@ def aggregate_results(all_results, output_dir):
         print(f"{r['fold']:4d}  {r['test_patient']:>7}  "
               f"{r['sensitivity']:7.4f}  {r['specificity']:7.4f}  "
               f"{r['f1']:7.4f}  {r['roc_auc']:7.4f}  "
-              f"{r['evt_f1']:7.4f}  {r['far_per_hr']:7.2f}  "
+              f"{r['evt_f1']:7.4f}  {r.get('szcore_evt_f1', float('nan')):7.4f}  "
+              f"{r['far_per_hr']:7.2f}  "
               f"{r['n_seizures']:5d}")
 
     print('-' * len(header))
 
     summary = {}
     for key in metrics_keys:
-        values = [r[key] for r in all_results if not (isinstance(r[key], float) and math.isnan(r[key]))]
+        values = [r[key] for r in all_results
+                  if key in r and not (isinstance(r[key], float) and math.isnan(r[key]))]
         if values:
             summary[key] = {
                 'mean': float(np.mean(values)),
