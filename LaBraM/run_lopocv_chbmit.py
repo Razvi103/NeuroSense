@@ -373,18 +373,6 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
     ch_names = CHBMIT_CH_NAMES
     best_train_loss = float('inf')
 
-    pid_counts = np.zeros(num_patients, dtype=np.float32)
-    for f, n in zip(train_dataset.h5_files, train_dataset.lengths):
-        pid_val = int(f['patient_ids'][0])
-        pid_counts[pid_val] += n
-    pid_counts = np.maximum(pid_counts, 1)
-    patient_class_weight = torch.from_numpy(
-        len(train_dataset) / (num_patients * pid_counts)
-    ).to(device)
-    print(f"  Patient class weights: min={patient_class_weight.min():.3f}, "
-          f"max={patient_class_weight.max():.3f}, "
-          f"mean={patient_class_weight.mean():.3f}")
-
     for epoch in range(args.epochs):
         train_stats = train_one_epoch_adversarial(
             model, criterion, train_loader, optimizer,
@@ -395,7 +383,6 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
             update_freq=args.update_freq, ch_names=ch_names, is_binary=True,
             total_epochs=args.epochs, adv_lambda=args.adv_lambda,
             adv_gamma=args.adv_gamma,
-            patient_class_weight=patient_class_weight,
         )
 
         current_loss = train_stats.get('loss', float('inf'))

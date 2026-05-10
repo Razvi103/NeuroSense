@@ -121,10 +121,16 @@ def load_fold_model(checkpoint_path, args, device):
         intermediate_layers=intermediate,
     )
 
-    old_head = 'seizure_head.weight' in clean_state and 'seizure_head.0.weight' not in clean_state
-    if old_head:
-        model.seizure_head = torch.nn.Linear(backbone.embed_dim, backbone.num_classes)
-        print("  Detected old single-layer seizure head checkpoint")
+    if 'seizure_head.0.weight' in clean_state:
+        model.seizure_head = torch.nn.Sequential(
+            torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
+        )
+        print("  Detected 2-layer MLP seizure head checkpoint")
+    else:
+        print("  Detected single-layer seizure head checkpoint")
 
     model.load_state_dict(clean_state, strict=False)
     model.to(device).eval()

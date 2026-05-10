@@ -563,20 +563,15 @@ class AdversarialNeuralTransformer(nn.Module):
 
         self.channel_attention = ChannelAttention(embed_dim)
         self.fc_norm = nn.LayerNorm(embed_dim)
-        self.seizure_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(embed_dim, backbone.num_classes),
-        )
+        self.seizure_head = nn.Linear(embed_dim, backbone.num_classes)
 
         self.grl = GradientReversalLayer()
         self.patient_discriminator = PatientDiscriminator(
             embed_dim, num_patients, hidden_dim=adv_hidden_dim,
         )
 
-        trunc_normal_(self.seizure_head[-1].weight, std=0.02)
-        nn.init.constant_(self.seizure_head[-1].bias, 0)
+        trunc_normal_(self.seizure_head.weight, std=0.02)
+        nn.init.constant_(self.seizure_head.bias, 0)
 
         # Multi-layer adversarial heads (hook-based, zero backbone changes)
         self._intermediate_features = {}
