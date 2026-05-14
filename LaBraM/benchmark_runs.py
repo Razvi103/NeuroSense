@@ -159,7 +159,7 @@ def find_scorenet(run_dir, checkpoints_root):
 @torch.no_grad()
 def run_inference(model, dataset, input_chans, device, batch_size=2048):
     """Run model inference on a dataset, return (y_prob, y_true) numpy arrays."""
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=16)
     all_probs, all_targets = [], []
 
     for samples, targets in tqdm(loader, desc="  inference", leave=False):
@@ -265,6 +265,23 @@ def compute_full_metrics(y_prob, y_true, y_pred):
     }
 
 
+def _prefixed(metrics, prefix):
+    """Return a dict with all metric keys prefixed, e.g. 'pp_test_pw_f1'."""
+    return {f"{prefix}{k}": v for k, v in metrics.items()}
+
+
+def _print_metrics(metrics, label):
+    """Print a compact metrics summary for one evaluation mode."""
+    print(f"  [{label}]  AUC={metrics['roc_auc']:.4f}  AUPRC={metrics['auprc']:.4f}  "
+          f"PW-F1={metrics['pw_f1']:.4f}  Sens={metrics['sens']:.4f}  Spec={metrics['spec']:.4f}")
+    print(f"  {'':>{len(label)+4}}Evt-F1={metrics['evt_f1']:.4f}  Evt-P={metrics['evt_prec']:.4f}  "
+          f"Evt-R={metrics['evt_recall']:.4f}  FAR/hr={metrics['far_hr']:.2f}  "
+          f"(TP={metrics['evt_tp']} FP={metrics['evt_fp']} FN={metrics['evt_fn']})")
+    print(f"  {'':>{len(label)+4}}SzCORE-F1={metrics['szcore_f1']:.4f}  "
+          f"SzCORE-Sens={metrics['szcore_sens']:.4f}  SzCORE-Prec={metrics['szcore_prec']:.4f}  "
+          f"SzCORE-FAR/hr={metrics['szcore_far_hr']:.2f}")
+
+
 # ── Main pipeline ────────────────────────────────────────────────────────────
 
 def process_run(run_name, run_dir, args, input_chans, val_dset, test_dset, device):
@@ -347,6 +364,7 @@ def process_run(run_name, run_dir, args, input_chans, val_dset, test_dset, devic
     print("  Evaluating on test (raw threshold=0.5)...")
     y_pred_raw = (y_prob_test >= 0.5).astype(int)
     raw_metrics = compute_full_metrics(y_prob_test, y_true_test, y_pred_raw)
+    _print_metrics(raw_metrics, "Raw thr=0.5")
 
     # 10. Evaluate on test: hand-tuned PP with frozen val params
     print("  Evaluating on test (hand-tuned PP)...")
@@ -355,6 +373,7 @@ def process_run(run_name, run_dir, args, input_chans, val_dset, test_dset, devic
         best_pp["smooth"], best_pp["min_dur"]
     )
     pp_metrics = compute_full_metrics(y_prob_test, y_true_test, y_pred_pp)
+    _print_metrics(pp_metrics, "Hand-tuned PP")
 
     # 11. ScoreNet (optional)
     sn_metrics = None
@@ -375,6 +394,7 @@ def process_run(run_name, run_dir, args, input_chans, val_dset, test_dset, devic
                 y_prob_test, sn_model, device, threshold=sn_thr, min_dur_sec=10
             )
             sn_metrics = compute_full_metrics(y_prob_test, y_true_test, y_pred_sn)
+            _print_metrics(sn_metrics, f"ScoreNet thr={sn_thr}")
             del sn_model
             torch.cuda.empty_cache()
         except Exception as e:
@@ -382,7 +402,7 @@ def process_run(run_name, run_dir, args, input_chans, val_dset, test_dset, devic
     else:
         print("  No ScoreNet checkpoint found")
 
-    # 12. Assemble result row
+    # 12. Assemble result row — all metrics for every eval mode
     row = {
         "run": run_name,
         "adversarial": is_adversarial,
@@ -395,56 +415,35 @@ def process_run(run_name, run_dir, args, input_chans, val_dset, test_dset, devic
         "best_val_epoch": best_epoch,
         "val_test_match": val_test_match,
         "best_test_epoch": best_test["epoch"] if best_test else "N/A",
-        # Val metrics from log.txt
         "val_roc_auc": best_val.get("val_roc_auc", None),
         "val_f1": best_val.get("val_f1", None),
         "val_balanced_acc": best_val.get("val_balanced_accuracy", None),
-        # Log test metrics (at best val epoch) from log.txt
         "log_test_roc_auc": best_val.get("test_roc_auc", None),
         "log_test_f1": best_val.get("test_f1", None),
-        # Raw test eval
-        "raw_test_roc_auc": raw_metrics["roc_auc"],
-        "raw_test_auprc": raw_metrics["auprc"],
-        "raw_test_pw_f1": raw_metrics["pw_f1"],
-        "raw_test_evt_f1": raw_metrics["evt_f1"],
-        # PP params (tuned on val)
+    }
+
+    row.update(_prefixed(raw_metrics, "raw_test_"))
+
+    row.update({
         "pp_t_high": best_pp["t_high"],
         "pp_t_low": best_pp["t_low"],
         "pp_smooth": best_pp["smooth"],
         "pp_min_dur": best_pp["min_dur"],
-        # PP test eval
-        "pp_test_pw_f1": pp_metrics["pw_f1"],
-        "pp_test_sens": pp_metrics["sens"],
-        "pp_test_spec": pp_metrics["spec"],
-        "pp_test_evt_f1": pp_metrics["evt_f1"],
-        "pp_test_evt_prec": pp_metrics["evt_prec"],
-        "pp_test_evt_recall": pp_metrics["evt_recall"],
-        "pp_test_far_hr": pp_metrics["far_hr"],
-        "pp_test_szcore_f1": pp_metrics["szcore_f1"],
-        "pp_test_szcore_far_hr": pp_metrics["szcore_far_hr"],
-        # ScoreNet
-        "sn_checkpoint": os.path.basename(sn_path) if sn_path else "N/A",
-        "sn_threshold": sn_thr if sn_thr is not None else "N/A",
-    }
+    })
+    row.update(_prefixed(pp_metrics, "pp_test_"))
 
+    row["sn_checkpoint"] = os.path.basename(sn_path) if sn_path else "N/A"
+    row["sn_threshold"] = sn_thr if sn_thr is not None else "N/A"
+    _ALL_METRIC_KEYS = [
+        "pw_f1", "sens", "spec", "prec", "roc_auc", "auprc",
+        "evt_f1", "evt_prec", "evt_recall", "far_hr", "evt_tp", "evt_fp", "evt_fn",
+        "szcore_f1", "szcore_sens", "szcore_prec", "szcore_far_hr",
+    ]
     if sn_metrics:
-        row.update({
-            "sn_test_pw_f1": sn_metrics["pw_f1"],
-            "sn_test_evt_f1": sn_metrics["evt_f1"],
-            "sn_test_evt_prec": sn_metrics["evt_prec"],
-            "sn_test_evt_recall": sn_metrics["evt_recall"],
-            "sn_test_far_hr": sn_metrics["far_hr"],
-            "sn_test_szcore_f1": sn_metrics["szcore_f1"],
-        })
+        row.update(_prefixed(sn_metrics, "sn_test_"))
     else:
-        row.update({
-            "sn_test_pw_f1": "N/A",
-            "sn_test_evt_f1": "N/A",
-            "sn_test_evt_prec": "N/A",
-            "sn_test_evt_recall": "N/A",
-            "sn_test_far_hr": "N/A",
-            "sn_test_szcore_f1": "N/A",
-        })
+        for k in _ALL_METRIC_KEYS:
+            row[f"sn_test_{k}"] = "N/A"
 
     return row
 
@@ -457,8 +456,10 @@ def print_summary(df):
 
     cols = [
         "run", "adversarial", "best_val_epoch", "val_roc_auc",
-        "raw_test_roc_auc", "pp_test_evt_f1", "pp_test_far_hr",
-        "sn_test_evt_f1", "val_test_match",
+        "raw_test_roc_auc", "raw_test_pw_f1",
+        "pp_test_pw_f1", "pp_test_evt_f1", "pp_test_far_hr", "pp_test_szcore_f1",
+        "sn_test_evt_f1", "sn_test_far_hr",
+        "val_test_match",
     ]
     present = [c for c in cols if c in df.columns]
     summary = df[present].copy()
