@@ -13,3 +13,4 @@ einops
 matplotlib
 tensorboardX
 tqdm
+timescoring
