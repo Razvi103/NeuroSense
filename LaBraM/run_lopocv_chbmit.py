@@ -4,16 +4,24 @@ Leave-One-Patient-Out Cross-Validation (LOPOCV) for CHB-MIT.
 Implements the standard 24-fold LOPOCV protocol used in the CHB-MIT seizure
 detection literature:
   - Each fold holds out 1 patient for testing, trains on the remaining 23
-  - Adversarial (GRL + patient discriminator) training only
+  - Supports both adversarial (GRL + channel attention) and pure baseline mode
   - Fixed training schedule (no per-fold hyperparameter tuning)
   - Reports per-fold and mean +/- std metrics
 
 Usage:
+    # Adversarial (default):
     python run_lopocv_chbmit.py \
         --data_dir /path/to/CHBMIT_per_patient \
         --finetune /path/to/labram_pretrained.pth \
         --output_dir /path/to/lopocv_results \
-        --epochs 15 --lr 5e-4 --batch_size 64
+        --epochs 20 --lr 3e-6 --batch_size 1024
+
+    # Pure baseline (no channel attention, no GRL):
+    python run_lopocv_chbmit.py --no_adversarial \
+        --data_dir /path/to/CHBMIT_per_patient \
+        --finetune /path/to/labram_pretrained.pth \
+        --output_dir /path/to/lopocv_results_baseline \
+        --epochs 20 --lr 3e-6 --batch_size 1024
 
     # Run specific folds (for multi-GPU parallelism):
     python run_lopocv_chbmit.py ... --folds 0,1,2,3,4,5
@@ -46,7 +54,7 @@ from torch.utils.data import DataLoader
 import modeling_finetune
 from modeling_finetune import AdversarialNeuralTransformer
 from dataset_maker.dataset_chbmit import MultiPatientAdversarialDataset
-from engine_for_finetuning import train_one_epoch_adversarial, evaluate
+from engine_for_finetuning import train_one_epoch, train_one_epoch_adversarial, evaluate
 from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
@@ -112,7 +120,12 @@ def get_args():
     p.set_defaults(use_mean_pooling=True)
     p.add_argument('--init_scale', default=0.001, type=float)
 
-    # Adversarial (defaults match proven CHB-MIT config)
+    # Baseline vs adversarial
+    p.add_argument('--no_adversarial', action='store_true', default=False,
+                   help='Run pure baseline (plain NeuralTransformer, no channel '
+                        'attention, no GRL). Overrides all adversarial settings.')
+
+    # Adversarial (defaults match proven CHB-MIT config; ignored with --no_adversarial)
     p.add_argument('--adv_lambda', default=0.01, type=float)
     p.add_argument('--adv_gamma', default=5.0, type=float)
     p.add_argument('--adv_hidden_dim', default=512, type=int)
@@ -175,7 +188,11 @@ def load_pretrained_state_dict(args):
 
 
 def build_model(args, num_patients, pretrained_state, device):
-    """Create a fresh AdversarialNeuralTransformer and load pretrained weights."""
+    """Create a model and load pretrained weights.
+
+    With --no_adversarial: returns the plain NeuralTransformer backbone.
+    Otherwise: wraps it in AdversarialNeuralTransformer.
+    """
     backbone = create_model(
         args.model,
         pretrained=False,
@@ -192,24 +209,44 @@ def build_model(args, num_patients, pretrained_state, device):
         qkv_bias=args.qkv_bias,
     )
 
-    il_str = args.intermediate_layers
-    intermediate = tuple(int(x) for x in il_str.split(',') if x.strip()) if il_str else ()
-
-    model = AdversarialNeuralTransformer(
-        backbone,
-        num_patients=num_patients,
-        adv_hidden_dim=args.adv_hidden_dim,
-        intermediate_layers=intermediate,
-    )
-
     if pretrained_state is not None:
         state = backbone.state_dict()
         filtered = {k: v for k, v in pretrained_state.items()
                     if k in state and v.shape == state[k].shape}
         utils.load_state_dict(backbone, filtered, prefix=args.model_prefix)
 
+    if args.no_adversarial:
+        model = backbone
+    else:
+        il_str = args.intermediate_layers
+        intermediate = tuple(int(x) for x in il_str.split(',') if x.strip()) if il_str else ()
+        model = AdversarialNeuralTransformer(
+            backbone,
+            num_patients=num_patients,
+            adv_hidden_dim=args.adv_hidden_dim,
+            intermediate_layers=intermediate,
+        )
+
     model.to(device)
     return model
+
+
+class _DropPatientID(torch.utils.data.Dataset):
+    """Wraps MultiPatientAdversarialDataset, dropping the patient_id column
+    so the dataloader yields (data, label) for the non-adversarial train loop."""
+
+    def __init__(self, dataset):
+        self._ds = dataset
+
+    def __len__(self):
+        return len(self._ds)
+
+    def __getitem__(self, idx):
+        data, label, _pid = self._ds[idx]
+        return data, label
+
+    def close(self):
+        self._ds.close()
 
 
 def get_events(binary_arr):
@@ -329,12 +366,20 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
     print(f"  Training on {len(train_paths)} patient files")
     print(f"{'='*60}")
 
-    train_dataset = MultiPatientAdversarialDataset(train_paths)
-    test_dataset = MultiPatientAdversarialDataset([test_path])
-    num_patients = train_dataset.num_patients
+    raw_train_dataset = MultiPatientAdversarialDataset(train_paths)
+    raw_test_dataset = MultiPatientAdversarialDataset([test_path])
+    num_patients = raw_train_dataset.num_patients
+
+    if args.no_adversarial:
+        train_dataset = _DropPatientID(raw_train_dataset)
+        test_dataset = _DropPatientID(raw_test_dataset)
+    else:
+        train_dataset = raw_train_dataset
+        test_dataset = raw_test_dataset
 
     print(f"  Train samples: {len(train_dataset)}, Test samples: {len(test_dataset)}")
-    print(f"  Num patients (discriminator classes): {num_patients}")
+    if not args.no_adversarial:
+        print(f"  Num patients (discriminator classes): {num_patients}")
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -382,16 +427,26 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
     best_train_loss = float('inf')
 
     for epoch in range(args.epochs):
-        train_stats = train_one_epoch_adversarial(
-            model, criterion, train_loader, optimizer,
-            device, epoch, loss_scaler, args.clip_grad, model_ema=None,
-            log_writer=None, start_steps=epoch * num_steps_per_epoch,
-            lr_schedule_values=lr_schedule, wd_schedule_values=wd_schedule,
-            num_training_steps_per_epoch=num_steps_per_epoch,
-            update_freq=args.update_freq, ch_names=ch_names, is_binary=True,
-            total_epochs=args.epochs, adv_lambda=args.adv_lambda,
-            adv_gamma=args.adv_gamma,
-        )
+        if args.no_adversarial:
+            train_stats = train_one_epoch(
+                model, criterion, train_loader, optimizer,
+                device, epoch, loss_scaler, args.clip_grad, model_ema=None,
+                log_writer=None, start_steps=epoch * num_steps_per_epoch,
+                lr_schedule_values=lr_schedule, wd_schedule_values=wd_schedule,
+                num_training_steps_per_epoch=num_steps_per_epoch,
+                update_freq=args.update_freq, ch_names=ch_names, is_binary=True,
+            )
+        else:
+            train_stats = train_one_epoch_adversarial(
+                model, criterion, train_loader, optimizer,
+                device, epoch, loss_scaler, args.clip_grad, model_ema=None,
+                log_writer=None, start_steps=epoch * num_steps_per_epoch,
+                lr_schedule_values=lr_schedule, wd_schedule_values=wd_schedule,
+                num_training_steps_per_epoch=num_steps_per_epoch,
+                update_freq=args.update_freq, ch_names=ch_names, is_binary=True,
+                total_epochs=args.epochs, adv_lambda=args.adv_lambda,
+                adv_gamma=args.adv_gamma,
+            )
 
         current_loss = train_stats.get('loss', float('inf'))
         if current_loss < best_train_loss:
@@ -428,8 +483,8 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
           f"ScEvF1={results['szcore_evt_f1']:.4f}  "
           f"FAR={results['far_per_hr']:.2f}/hr")
 
-    train_dataset.close()
-    test_dataset.close()
+    raw_train_dataset.close()
+    raw_test_dataset.close()
 
     return results
 
