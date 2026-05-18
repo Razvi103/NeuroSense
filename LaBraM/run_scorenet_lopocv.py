@@ -96,7 +96,7 @@ def get_args():
 # ---------------------------------------------------------------------------
 
 def load_fold_model(checkpoint_path, args, device):
-    """Load an adversarial LaBraM model from a fold checkpoint."""
+    """Load a LaBraM model from a fold checkpoint (adversarial or baseline)."""
     backbone = create_model(
         args.model, pretrained=False, num_classes=1,
         drop_rate=0.0, drop_path_rate=args.drop_path, use_mean_pooling=True,
@@ -110,29 +110,35 @@ def load_fold_model(checkpoint_path, args, device):
 
     disc_keys = [k for k in clean_state
                  if k.startswith('patient_discriminator') and k.endswith('.weight')]
-    num_patients = clean_state[disc_keys[-1]].shape[0]
 
-    il_str = args.intermediate_layers
-    intermediate = tuple(int(x) for x in il_str.split(',') if x.strip()) if il_str else ()
+    if disc_keys:
+        num_patients = clean_state[disc_keys[-1]].shape[0]
+        il_str = args.intermediate_layers
+        intermediate = tuple(int(x) for x in il_str.split(',') if x.strip()) if il_str else ()
 
-    model = AdversarialNeuralTransformer(
-        backbone, num_patients=num_patients,
-        adv_hidden_dim=args.adv_hidden_dim,
-        intermediate_layers=intermediate,
-    )
-
-    if 'seizure_head.0.weight' in clean_state:
-        model.seizure_head = torch.nn.Sequential(
-            torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
-            torch.nn.GELU(),
-            torch.nn.Dropout(0.2),
-            torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
+        model = AdversarialNeuralTransformer(
+            backbone, num_patients=num_patients,
+            adv_hidden_dim=args.adv_hidden_dim,
+            intermediate_layers=intermediate,
         )
-        print("  Detected 2-layer MLP seizure head checkpoint")
-    else:
-        print("  Detected single-layer seizure head checkpoint")
 
-    model.load_state_dict(clean_state, strict=False)
+        if 'seizure_head.0.weight' in clean_state:
+            model.seizure_head = torch.nn.Sequential(
+                torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
+                torch.nn.GELU(),
+                torch.nn.Dropout(0.2),
+                torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
+            )
+            print("  Detected adversarial checkpoint (2-layer MLP seizure head)")
+        else:
+            print("  Detected adversarial checkpoint (single-layer seizure head)")
+
+        model.load_state_dict(clean_state, strict=False)
+    else:
+        backbone.load_state_dict(clean_state, strict=False)
+        model = backbone
+        print("  Detected baseline checkpoint")
+
     model.to(device).eval()
     return model
 
@@ -428,6 +434,7 @@ def process_fold(fold_idx, test_pid, fold_dir, ckpt_path, patient_h5s, args, dev
     sn_ckpt_path = os.path.join(fold_dir, 'scorenet_best.pth')
     torch.save({
         'model_state_dict': sn_model.state_dict(),
+        'args': {'w': args.sn_w, 'gamma': args.sn_gamma},
         'w': args.sn_w,
         'gamma': args.sn_gamma,
         'train_loss': sn_best_loss,
