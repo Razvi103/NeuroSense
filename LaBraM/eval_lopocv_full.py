@@ -121,29 +121,35 @@ def load_fold_model(ckpt_path, args, device):
 
     disc_keys = [k for k in clean
                  if k.startswith('patient_discriminator') and k.endswith('.weight')]
-    num_patients = clean[disc_keys[-1]].shape[0]
 
-    il = args.intermediate_layers
-    intermediate = tuple(int(x) for x in il.split(',') if x.strip()) if il else ()
+    if disc_keys:
+        num_patients = clean[disc_keys[-1]].shape[0]
+        il = args.intermediate_layers
+        intermediate = tuple(int(x) for x in il.split(',') if x.strip()) if il else ()
 
-    model = AdversarialNeuralTransformer(
-        backbone, num_patients=num_patients,
-        adv_hidden_dim=args.adv_hidden_dim,
-        intermediate_layers=intermediate,
-    )
-
-    if 'seizure_head.0.weight' in clean:
-        model.seizure_head = torch.nn.Sequential(
-            torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
-            torch.nn.GELU(),
-            torch.nn.Dropout(0.2),
-            torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
+        model = AdversarialNeuralTransformer(
+            backbone, num_patients=num_patients,
+            adv_hidden_dim=args.adv_hidden_dim,
+            intermediate_layers=intermediate,
         )
-        print("    Detected 2-layer MLP seizure head checkpoint")
-    else:
-        print("    Detected single-layer seizure head checkpoint")
 
-    model.load_state_dict(clean, strict=False)
+        if 'seizure_head.0.weight' in clean:
+            model.seizure_head = torch.nn.Sequential(
+                torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
+                torch.nn.GELU(),
+                torch.nn.Dropout(0.2),
+                torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
+            )
+            print("    Detected adversarial checkpoint (2-layer MLP seizure head)")
+        else:
+            print("    Detected adversarial checkpoint (single-layer seizure head)")
+
+        model.load_state_dict(clean, strict=False)
+    else:
+        backbone.load_state_dict(clean, strict=False)
+        model = backbone
+        print("    Detected baseline checkpoint")
+
     return model.to(device).eval()
 
 
