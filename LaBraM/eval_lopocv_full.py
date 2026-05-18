@@ -400,12 +400,14 @@ def main():
                 strat_summary[key] = {
                     'mean': float(np.mean(values)),
                     'std': float(np.std(values)),
+                    'median': float(np.median(values)),
                     'min': float(np.min(values)),
                     'max': float(np.max(values)),
                 }
                 print(f"    {key:>22}: "
                       f"{strat_summary[key]['mean']:.4f} +/- "
                       f"{strat_summary[key]['std']:.4f}  "
+                      f"median={strat_summary[key]['median']:.4f}  "
                       f"[{strat_summary[key]['min']:.4f}, "
                       f"{strat_summary[key]['max']:.4f}]")
 
