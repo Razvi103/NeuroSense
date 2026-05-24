@@ -362,7 +362,7 @@ def main():
 
     # --- Aggregation ---
     metric_keys = [
-        'sensitivity', 'specificity', 'f1', 'auc', 'auprc',
+        'sensitivity', 'specificity', 'precision', 'f1', 'auc', 'auprc',
         'evt_f1', 'evt_recall', 'evt_precision', 'evt_far_hr',
         'szcore_evt_f1', 'szcore_evt_recall', 'szcore_evt_precision',
         'szcore_far_hr', 'szcore_far_day',
