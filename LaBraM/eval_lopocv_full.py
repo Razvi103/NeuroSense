@@ -305,7 +305,8 @@ def main():
         results_by_strategy['raw'].append(raw_metrics)
         print(f"    raw:        F1={raw_metrics['f1']:.4f}  "
               f"EvtF1={raw_metrics['evt_f1']:.4f}  "
-              f"ScEvF1={raw_metrics['szcore_evt_f1']:.4f}")
+              f"ScEvF1={raw_metrics['szcore_evt_f1']:.4f}  "
+              f"ScEvPrc={raw_metrics['szcore_evt_precision']:.4f}")
 
         # --- Strategy 2: Hand-tuned ---
         y_pred_ht = post_process_probs(
@@ -318,7 +319,8 @@ def main():
         results_by_strategy['hand_tuned'].append(ht_metrics)
         print(f"    hand_tuned: F1={ht_metrics['f1']:.4f}  "
               f"EvtF1={ht_metrics['evt_f1']:.4f}  "
-              f"ScEvF1={ht_metrics['szcore_evt_f1']:.4f}")
+              f"ScEvF1={ht_metrics['szcore_evt_f1']:.4f}  "
+              f"ScEvPrc={ht_metrics['szcore_evt_precision']:.4f}")
 
         # --- Strategy 3: ScoreNet (if checkpoint exists) ---
         sn_path = os.path.join(fold_dir, 'scorenet_best.pth')
@@ -345,7 +347,8 @@ def main():
             results_by_strategy['scorenet'].append(sn_metrics)
             print(f"    scorenet:   F1={sn_metrics['f1']:.4f}  "
                   f"EvtF1={sn_metrics['evt_f1']:.4f}  "
-                  f"ScEvF1={sn_metrics['szcore_evt_f1']:.4f}")
+                  f"ScEvF1={sn_metrics['szcore_evt_f1']:.4f}  "
+                  f"ScEvPrc={sn_metrics['szcore_evt_precision']:.4f}")
 
             del sn_model, Z, refined
             torch.cuda.empty_cache()
@@ -377,7 +380,8 @@ def main():
 
         header = (f"  {'Fold':>4}  {'Patient':>7}  {'Sens':>7}  {'F1':>7}  "
                   f"{'AUC':>7}  {'EvtF1':>7}  {'ScEvF1':>7}  "
-                  f"{'EvtRec':>7}  {'FAR/hr':>7}  {'Szrs':>5}")
+                  f"{'ScEvRec':>7}  {'ScEvPrc':>7}  "
+                  f"{'FAR/hr':>7}  {'Szrs':>5}")
         print(header)
         print('  ' + '-' * (len(header) - 2))
 
@@ -386,7 +390,9 @@ def main():
                   f"{r['sensitivity']:7.4f}  {r['f1']:7.4f}  "
                   f"{r['auc']:7.4f}  {r['evt_f1']:7.4f}  "
                   f"{r['szcore_evt_f1']:7.4f}  "
-                  f"{r['evt_recall']:7.4f}  {r['evt_far_hr']:7.2f}  "
+                  f"{r['szcore_evt_recall']:7.4f}  "
+                  f"{r['szcore_evt_precision']:7.4f}  "
+                  f"{r['szcore_far_hr']:7.2f}  "
                   f"{r['n_seizures']:5d}")
 
         print('  ' + '-' * (len(header) - 2))
