@@ -30,6 +30,7 @@ import os
 import csv
 import json
 import argparse
+import gc
 import numpy as np
 import mne
 import h5py
@@ -40,6 +41,7 @@ WINDOW_SIZE = 2      # seconds
 STRIDE = 1           # seconds
 TARGET_FREQ = 200    # Hz
 NUM_CHANNELS = 19
+BATCH_SIZE = 200     # files per batch to bound memory
 
 # 19 standard 10-20 unipolar channels (matches TUSZ_CH_NAMES in evaluate_checkpoint.py)
 STANDARD_CHANNELS = [
@@ -182,8 +184,7 @@ def _process_single_edf(edf_path, csv_bi_path, patient_int_id, recording_int_id,
                          window_size, stride, target_freq):
     """
     Worker function: reads one EDF, filters, resamples, windows, and labels.
-    Returns (segments, labels, patient_int_id, recording_int_id, n_windows)
-    or None on failure.
+    Returns (result_dict, error_string) -- result_dict is None on failure.
     """
     window_pts = int(window_size * target_freq)
     stride_pts = int(stride * target_freq)
@@ -214,7 +215,6 @@ def _process_single_edf(edf_path, csv_bi_path, patient_int_id, recording_int_id,
     if n_samples < window_pts:
         return None, f"Recording too short ({n_samples} samples) in {os.path.basename(edf_path)}"
 
-    # Vectorized windowing via stride_tricks
     n_windows = (n_samples - window_pts) // stride_pts + 1
     byte_stride = data.strides[1]
     segments = np.lib.stride_tricks.as_strided(
@@ -224,7 +224,6 @@ def _process_single_edf(edf_path, csv_bi_path, patient_int_id, recording_int_id,
     ).copy()
     segments = segments.transpose(1, 0, 2).astype(np.float32)  # (n_windows, C, T)
 
-    # Vectorized labeling: build seizure mask then sample at midpoints
     seizure_intervals = parse_csv_bi(csv_bi_path)
     starts = np.arange(n_windows) * stride_pts
     midpoints_sec = (starts + window_pts / 2) / target_freq
@@ -243,6 +242,32 @@ def _process_single_edf(edf_path, csv_bi_path, patient_int_id, recording_int_id,
     return result, None
 
 
+def _flush_batch(batch_results, h5_file, offset):
+    """Write a batch of results to H5 datasets and return new offset."""
+    dset_data = h5_file['data']
+    dset_labels = h5_file['labels']
+    dset_pids = h5_file['patient_ids']
+    dset_rids = h5_file['recording_ids']
+
+    batch_windows = sum(r['n_windows'] for r in batch_results)
+    new_len = offset + batch_windows
+    dset_data.resize(new_len, axis=0)
+    dset_labels.resize(new_len, axis=0)
+    dset_pids.resize(new_len, axis=0)
+    dset_rids.resize(new_len, axis=0)
+
+    pos = offset
+    for r in batch_results:
+        n = r['n_windows']
+        dset_data[pos:pos + n] = r['segments']
+        dset_labels[pos:pos + n] = r['labels']
+        dset_pids[pos:pos + n] = r['patient_id']
+        dset_rids[pos:pos + n] = r['recording_id']
+        pos += n
+
+    return new_len
+
+
 def main():
     parser = argparse.ArgumentParser(description='Preprocess TUSZ v2.0 into HDF5')
     parser.add_argument('--data_root', required=True, type=str,
@@ -255,6 +280,8 @@ def main():
                         help='Stride in seconds (default: 1)')
     parser.add_argument('--num_workers', default=0, type=int,
                         help='Number of parallel workers (0 = auto, 1 = sequential)')
+    parser.add_argument('--batch_size', default=BATCH_SIZE, type=int,
+                        help='Files per batch to bound memory (default: 200)')
     args = parser.parse_args()
 
     if args.num_workers <= 0:
@@ -269,7 +296,6 @@ def main():
 
     window_pts = int(args.window_size * TARGET_FREQ)
 
-    # Collect all patient strings across splits for a global mapping
     all_patient_strs = set()
     split_pairs = {}
     for split_name in SPLIT_MAP:
@@ -283,9 +309,8 @@ def main():
 
     patient_to_int = {p: i for i, p in enumerate(sorted(all_patient_strs))}
     print(f"\nTotal unique patients across all splits: {len(patient_to_int)}")
-    print(f"Using {args.num_workers} workers for parallel EDF processing")
+    print(f"Using {args.num_workers} workers, batch size {args.batch_size}")
 
-    # Global recording ID counter (unique across all splits)
     recording_counter = 0
 
     for split_name, h5_name in SPLIT_MAP.items():
@@ -300,121 +325,122 @@ def main():
 
         h5_path = os.path.join(args.output_dir, h5_name)
 
-        # Assign recording IDs and patient IDs for each file
         file_jobs = []
         for edf_path, csv_bi_path, patient_str in pairs:
             pid = patient_to_int[patient_str]
             file_jobs.append((edf_path, csv_bi_path, pid, recording_counter))
             recording_counter += 1
 
-        # Estimate total windows for pre-allocation (assume ~1 hr avg -> ~3600 windows)
-        est_windows = len(file_jobs) * 3600
-
-        # Phase 1: parallel EDF processing
-        all_results = [None] * len(file_jobs)
+        total_written = 0
+        total_seizure = 0
         n_skipped = 0
-
-        if args.num_workers == 1:
-            for i, (edf_path, csv_bi_path, pid, rid) in enumerate(
-                tqdm(file_jobs, desc=f"{split_name} (sequential)")
-            ):
-                result, err = _process_single_edf(
-                    edf_path, csv_bi_path, pid, rid,
-                    args.window_size, args.stride, TARGET_FREQ,
-                )
-                if err:
-                    tqdm.write(err)
-                    n_skipped += 1
-                else:
-                    all_results[i] = result
-        else:
-            futures = {}
-            with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-                for i, (edf_path, csv_bi_path, pid, rid) in enumerate(file_jobs):
-                    fut = executor.submit(
-                        _process_single_edf,
-                        edf_path, csv_bi_path, pid, rid,
-                        args.window_size, args.stride, TARGET_FREQ,
-                    )
-                    futures[fut] = i
-
-                pbar = tqdm(total=len(futures), desc=f"{split_name} (parallel)")
-                for fut in as_completed(futures):
-                    idx = futures[fut]
-                    try:
-                        result, err = fut.result()
-                    except Exception as exc:
-                        tqdm.write(f"Worker exception: {exc}")
-                        n_skipped += 1
-                        pbar.update(1)
-                        continue
-                    if err:
-                        tqdm.write(err)
-                        n_skipped += 1
-                    else:
-                        all_results[idx] = result
-                    pbar.update(1)
-                pbar.close()
-
-        # Count actual total windows
-        valid_results = [r for r in all_results if r is not None]
-        total_windows = sum(r['n_windows'] for r in valid_results)
-
-        if total_windows == 0:
-            print(f"  No valid windows produced, skipping H5 creation")
-            continue
-
-        # Phase 2: sequential H5 write with pre-allocation
-        print(f"  Writing {total_windows} windows from {len(valid_results)} "
-              f"recordings ({n_skipped} skipped) ...")
+        n_processed = 0
 
         with h5py.File(h5_path, 'w') as f:
             dset_data = f.create_dataset(
                 'data',
-                shape=(total_windows, NUM_CHANNELS, window_pts),
+                shape=(0, NUM_CHANNELS, window_pts),
+                maxshape=(None, NUM_CHANNELS, window_pts),
                 dtype='float32',
                 chunks=(512, NUM_CHANNELS, window_pts),
             )
-            dset_labels = f.create_dataset(
+            f.create_dataset(
                 'labels',
-                shape=(total_windows,),
+                shape=(0,),
+                maxshape=(None,),
                 dtype='int64',
-                chunks=(512,),
+                chunks=(4096,),
             )
-            dset_pids = f.create_dataset(
+            f.create_dataset(
                 'patient_ids',
-                shape=(total_windows,),
+                shape=(0,),
+                maxshape=(None,),
                 dtype='int64',
-                chunks=(512,),
+                chunks=(4096,),
             )
-            dset_rids = f.create_dataset(
+            f.create_dataset(
                 'recording_ids',
-                shape=(total_windows,),
+                shape=(0,),
+                maxshape=(None,),
                 dtype='int64',
-                chunks=(512,),
+                chunks=(4096,),
             )
-
             f.attrs['patient_to_int'] = json.dumps(patient_to_int)
 
-            # Write results in submission order (preserves file ordering)
-            offset = 0
-            for r in all_results:
-                if r is None:
-                    continue
-                n = r['n_windows']
-                dset_data[offset:offset + n] = r['segments']
-                dset_labels[offset:offset + n] = r['labels']
-                dset_pids[offset:offset + n] = r['patient_id']
-                dset_rids[offset:offset + n] = r['recording_id']
-                offset += n
+            n_batches = (len(file_jobs) + args.batch_size - 1) // args.batch_size
+            pbar = tqdm(total=len(file_jobs), desc=split_name)
 
-            total_seizure = int(np.sum(dset_labels[:]))
-            unique_patients = len(set(dset_pids[:].tolist()))
-            unique_recordings = len(set(dset_rids[:].tolist()))
+            for batch_idx in range(n_batches):
+                start_i = batch_idx * args.batch_size
+                end_i = min(start_i + args.batch_size, len(file_jobs))
+                batch_jobs = file_jobs[start_i:end_i]
 
-        print(f"  Total segments: {total_windows}")
+                # Process this batch of EDFs in parallel, collect results
+                # ordered by submission index to preserve file ordering
+                batch_results = [None] * len(batch_jobs)
+
+                if args.num_workers == 1:
+                    for i, (edf_path, csv_bi_path, pid_val, rid) in enumerate(batch_jobs):
+                        result, err = _process_single_edf(
+                            edf_path, csv_bi_path, pid_val, rid,
+                            args.window_size, args.stride, TARGET_FREQ,
+                        )
+                        if err:
+                            tqdm.write(err)
+                            n_skipped += 1
+                        else:
+                            batch_results[i] = result
+                        pbar.update(1)
+                else:
+                    futures = {}
+                    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+                        for i, (edf_path, csv_bi_path, pid_val, rid) in enumerate(batch_jobs):
+                            fut = executor.submit(
+                                _process_single_edf,
+                                edf_path, csv_bi_path, pid_val, rid,
+                                args.window_size, args.stride, TARGET_FREQ,
+                            )
+                            futures[fut] = i
+
+                        for fut in as_completed(futures):
+                            idx = futures[fut]
+                            try:
+                                result, err = fut.result()
+                            except Exception as exc:
+                                tqdm.write(f"Worker exception: {exc}")
+                                n_skipped += 1
+                                pbar.update(1)
+                                continue
+                            if err:
+                                tqdm.write(err)
+                                n_skipped += 1
+                            else:
+                                batch_results[idx] = result
+                            pbar.update(1)
+
+                # Flush valid results to H5 immediately
+                valid = [r for r in batch_results if r is not None]
+                if valid:
+                    total_written = _flush_batch(valid, f, total_written)
+                    total_seizure += sum(int(r['labels'].sum()) for r in valid)
+                    n_processed += len(valid)
+
+                # Free memory before next batch
+                del batch_results, valid
+                gc.collect()
+
+            pbar.close()
+
+            unique_patients = 0
+            unique_recordings = 0
+            if total_written > 0:
+                unique_patients = len(set(f['patient_ids'][:].tolist()))
+                unique_recordings = len(set(f['recording_ids'][:].tolist()))
+
+        print(f"  Total segments: {total_written}")
         print(f"  Seizure segments: {total_seizure}  "
-              f"({100*total_seizure/max(total_windows,1):.2f}%)")
+              f"({100*total_seizure/max(total_written,1):.2f}%)")
+        print(f"  Recordings processed: {n_processed}  (skipped: {n_skipped})")
         print(f"  Unique patients: {unique_patients}")
         print(f"  Unique recordings: {unique_recordings}")
         print(f"  Saved to {h5_path}")
