@@ -16,7 +16,7 @@ class CHBMITDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        # Shape is (Channels, Time) -> (23, 400)
+        # Shape is (Channels, Time) -> e.g. (19, 400) for TUSZ, (23, 400) for CHB-MIT
         data = self.h5_file['data'][idx]
         label = self.h5_file['labels'][idx]
         

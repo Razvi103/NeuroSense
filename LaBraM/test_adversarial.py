@@ -158,7 +158,7 @@ def test_adversarial_dataset():
         h5_path = os.path.join(tmpdir, 'test.h5')
         N = 16
         with h5py.File(h5_path, 'w') as f:
-            f.create_dataset('data', data=np.random.randn(N, 23, 400).astype(np.float32))
+            f.create_dataset('data', data=np.random.randn(N, 19, 400).astype(np.float32))
             f.create_dataset('labels', data=np.random.randint(0, 2, N).astype(np.int64))
             f.create_dataset('patient_ids', data=np.random.randint(0, 3, N).astype(np.int64))
 
@@ -167,14 +167,14 @@ def test_adversarial_dataset():
         assert ds.num_patients == 3 or ds.num_patients >= 1
 
         data, label, pid = ds[0]
-        assert data.shape == (23, 400), f"Data shape {data.shape}"
+        assert data.shape == (19, 400), f"Data shape {data.shape}"
         assert isinstance(label, (int, np.integer)), f"Label type {type(label)}"
         assert isinstance(pid, int), f"PID type {type(pid)}"
 
         # Test fallback without patient_ids
         h5_path2 = os.path.join(tmpdir, 'test_no_pid.h5')
         with h5py.File(h5_path2, 'w') as f:
-            f.create_dataset('data', data=np.random.randn(4, 23, 400).astype(np.float32))
+            f.create_dataset('data', data=np.random.randn(4, 19, 400).astype(np.float32))
             f.create_dataset('labels', data=np.random.randint(0, 2, 4).astype(np.int64))
 
         ds2 = TUSZAdversarialDataset(h5_path2)
