@@ -296,7 +296,6 @@ def main():
 
     window_pts = int(args.window_size * TARGET_FREQ)
 
-    all_patient_strs = set()
     split_pairs = {}
     for split_name in SPLIT_MAP:
         split_dir = os.path.join(edf_root, split_name)
@@ -304,11 +303,12 @@ def main():
             continue
         pairs = find_edf_annotation_pairs(split_dir)
         split_pairs[split_name] = pairs
-        for _, _, patient_str in pairs:
-            all_patient_strs.add(patient_str)
 
-    patient_to_int = {p: i for i, p in enumerate(sorted(all_patient_strs))}
-    print(f"\nTotal unique patients across all splits: {len(patient_to_int)}")
+    all_patients = set()
+    for pairs in split_pairs.values():
+        for _, _, patient_str in pairs:
+            all_patients.add(patient_str)
+    print(f"\nTotal unique patients across all splits: {len(all_patients)}")
     print(f"Using {args.num_workers} workers, batch size {args.batch_size}")
 
     recording_counter = 0
@@ -319,8 +319,14 @@ def main():
             continue
 
         pairs = split_pairs[split_name]
+
+        # Per-split patient mapping: contiguous IDs 0..N-1 for this split
+        split_patient_strs = sorted(set(p for _, _, p in pairs))
+        patient_to_int = {p: i for i, p in enumerate(split_patient_strs)}
+
         print(f"\n{'='*60}")
-        print(f"Split: {split_name} -> {h5_name}  ({len(pairs)} EDF files)")
+        print(f"Split: {split_name} -> {h5_name}  ({len(pairs)} EDF files, "
+              f"{len(patient_to_int)} patients)")
         print(f"{'='*60}")
 
         h5_path = os.path.join(args.output_dir, h5_name)
