@@ -30,7 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import h5py
 import numpy as np
@@ -461,7 +461,9 @@ def main():
         if device.type == 'cuda':
             torch.cuda.empty_cache()
 
-    out = {'settings': vars(args), 'results': results}
+    settings = vars(args).copy()
+    settings['run'] = [asdict(r) for r in args.run]
+    out = {'settings': settings, 'results': results}
     with open(args.output, 'w') as f:
         json.dump(out, f, indent=2)
     print(f"\nSaved → {args.output}")
