@@ -9,11 +9,13 @@ Usage:
         --data_path /path/to/TUSZ \\
         --dataset TUSZ \\
         --run "Baseline:baseline:/path/to/baseline/checkpoint-best.pth" \\
-        --run "B+A:adversarial:/path/to/ba/checkpoint-best.pth" \\
-        --run "B+A+GRL:adversarial:/path/to/grl/checkpoint-best.pth" \\
-        --run "B+A+GRL+multi:adversarial:/path/to/multi/checkpoint-best.pth:3,7" \\
+        --run "Single_GRL:adversarial:/path/to/single_grl/checkpoint-best.pth" \\
+        --run "Multi_GRL:adversarial:/path/to/multilayer_grl/checkpoint-best.pth:3,7" \\
         --layers final,block_3,block_7 \\
         --output patient_probe_results.json
+
+Features are **mean-pooled patch tokens + fc_norm** at every depth (backbone
+only, no channel attention).  Compare Baseline vs single-GRL vs multi-GRL.
 
 Each ``--run`` argument: ``NAME:TYPE:CHECKPOINT[:INTERMEDIATE_LAYERS]``
   TYPE = baseline | adversarial
@@ -179,28 +181,17 @@ def _forward_patch_tokens_to_block(backbone, x, input_chans, block_idx, token_fc
 
 
 def extract_probe_features(model, x, input_chans, layer='final'):
-    """Return (B, D) features for the patient probe.
+    """Return (B, D) backbone features: mean pool over patch tokens + fc_norm.
 
-    Adversarial: channel attention + fc_norm at every depth.
-    Baseline: mean pool + fc_norm (final or partial block).
+    Same readout at every depth for baseline and adversarial checkpoints.
+    Channel attention is not used (not relevant for this experiment).
     """
     block_idx = _parse_layer(layer)
-    _, n_channels, n_time, _ = x.shape
-
-    if isinstance(model, AdversarialNeuralTransformer):
-        patch_tokens = _forward_patch_tokens_to_block(
-            model.backbone, x, input_chans, block_idx, token_fc_norm=True,
-        )
-        pooled, _ = model.channel_attention(patch_tokens, n_channels, n_time)
-        return model.fc_norm(pooled)
-
-    if block_idx is None:
-        return model.forward_features(x, input_chans=input_chans)
-
+    backbone = model.backbone if isinstance(model, AdversarialNeuralTransformer) else model
     patch_tokens = _forward_patch_tokens_to_block(
-        model, x, input_chans, block_idx, token_fc_norm=False,
+        backbone, x, input_chans, block_idx, token_fc_norm=False,
     )
-    return model.fc_norm(patch_tokens.mean(dim=1))
+    return backbone.fc_norm(patch_tokens.mean(dim=1))
 
 
 @torch.no_grad()
@@ -447,8 +438,7 @@ def main():
                     'layer': layer,
                     'split': args.split,
                     'checkpoint': run.checkpoint,
-                    'readout': 'channel_attention+fc_norm' if run.model_type == 'adversarial'
-                               else 'mean_pool+fc_norm',
+                    'readout': 'mean_pool+fc_norm',
                 })
                 results[run.name][layer] = metrics
                 print(f"    balanced_acc={metrics['balanced_accuracy']:.4f}  "
