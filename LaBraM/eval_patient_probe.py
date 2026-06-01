@@ -67,7 +67,6 @@ from tqdm import tqdm
 
 import modeling_finetune  # noqa: F401 — registers timm models
 from modeling_finetune import AdversarialNeuralTransformer
-from dataset_maker.dataset_chbmit import MultiPatientAdversarialDataset
 import utils
 
 
@@ -267,12 +266,15 @@ def extract_features_from_train_paths(
     model, train_paths, input_chans, device, batch_size, num_workers, layer,
     max_windows_per_patient=0, seed=42,
 ):
-    dset = MultiPatientAdversarialDataset(train_paths)
-    return extract_features_from_dataset(
-        model, dset, input_chans, device, batch_size, num_workers, layer,
-        desc=f"{len(train_paths)} patients",
-        max_windows_per_patient=max_windows_per_patient, seed=seed,
-    )
+    all_X, all_y = [], []
+    for path in train_paths:
+        X_i, y_i = extract_features_from_h5(
+            model, path, input_chans, device, batch_size, num_workers, layer,
+            max_windows_per_patient, seed,
+        )
+        all_X.append(X_i)
+        all_y.append(y_i)
+    return np.concatenate(all_X), np.concatenate(all_y)
 
 
 # ---------------------------------------------------------------------------
