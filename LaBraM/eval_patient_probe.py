@@ -72,9 +72,9 @@ import utils
 
 
 CHBMIT_CH_NAMES = [
-    'FP1-F7', 'F7-T7', 'T7-P7', 'P7-O1', 'FP1-F3', 'F3-C3', 'C3-P3', 'P3-O1',
-    'FP2-F4', 'F4-C4', 'C4-P4', 'P4-O2', 'FP2-F8', 'F8-T8', 'T8-P8', 'P8-O2',
-    'FZ-CZ', 'CZ-PZ', 'P7-T7', 'T7-FT9', 'FT9-FT10', 'FT10-T8', 'T8-P8',
+    'F7', 'T3', 'T5', 'O1', 'F3', 'C3', 'C3', 'O1',
+    'F4', 'C4', 'C4', 'O2', 'F8', 'T4', 'T6', 'O2',
+    'CZ', 'PZ', 'T5', 'FT9', 'FT10', 'T4', 'T6'
 ]
 TUSZ_CH_NAMES = [
     'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4',
