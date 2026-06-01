@@ -467,23 +467,27 @@ def aggregate_fold_metrics(per_fold):
 
 
 def run_lopocv_probe(args, layers, device, input_chans, patient_h5s):
-    """Run patient probe across LOPOCV folds for each run config and layer."""
+    """Run patient probe across LOPOCV folds for each layer and run config.
+
+    Execution order: layer → variant (--run) → fold, so all three variants
+    complete for one layer before moving to the next.
+    """
     fold_filter = None
     if args.folds:
         fold_filter = {int(x.strip()) for x in args.folds.split(',') if x.strip()}
 
-    results = {}
-    for run in args.run:
-        results[run.name] = {}
-        lopocv_dir = run.checkpoint
-        folds = discover_lopocv_folds(lopocv_dir, fold_filter)
-        if not folds:
-            raise FileNotFoundError(f"No LOPOCV folds found in {lopocv_dir}")
+    results = {run.name: {} for run in args.run}
 
-        print(f"\n[{run.name}] LOPOCV root ← {lopocv_dir}  ({len(folds)} folds)")
+    for layer in layers:
+        print(f"\n=== layer={layer} ===")
 
-        for layer in layers:
-            print(f"  layer={layer}")
+        for run in args.run:
+            lopocv_dir = run.checkpoint
+            folds = discover_lopocv_folds(lopocv_dir, fold_filter)
+            if not folds:
+                raise FileNotFoundError(f"No LOPOCV folds found in {lopocv_dir}")
+
+            print(f"\n  [{run.name}] LOPOCV root ← {lopocv_dir}  ({len(folds)} folds)")
             safe = run.name.replace(' ', '_').replace('+', 'p')
             per_fold = []
 
