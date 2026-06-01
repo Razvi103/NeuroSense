@@ -17,6 +17,12 @@ Usage:
 
 Each ``--run`` argument: ``NAME:TYPE:CHECKPOINT[:INTERMEDIATE_LAYERS]``
   TYPE = baseline | adversarial
+
+TUSZ train / dev / test are **patient-disjoint** and use **per-split patient ID
+mappings**.  The probe therefore runs entirely within one HDF5 split (default
+``train.h5``): extract features, then 80/20 **window** split stratified by
+patient so every patient in that split appears in both probe-train and
+probe-eval.  Do not train on train and evaluate on val/test.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from sklearn.metrics import balanced_accuracy_score, f1_score
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from timm.models import create_model
 from torch.utils.data import DataLoader, Dataset, TensorDataset
@@ -288,9 +294,13 @@ def train_and_eval_probe(
     id_to_class = {pid: i for i, pid in enumerate(unique_ids)}
     y_cls = np.array([id_to_class[pid] for pid in y], dtype=np.int64)
 
-    train_idx, eval_idx = next(GroupShuffleSplit(
-        n_splits=1, test_size=test_size, random_state=seed,
-    ).split(X, y_cls, groups=y_cls))
+    # Window-level split stratified by patient — every patient must appear in
+    # probe-train, otherwise held-out patients have zero training examples and
+    # accuracy is trivially 0.
+    indices = np.arange(len(y_cls))
+    train_idx, eval_idx = train_test_split(
+        indices, test_size=test_size, stratify=y_cls, random_state=seed,
+    )
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X[train_idx]).astype(np.float32)
@@ -326,6 +336,7 @@ def train_and_eval_probe(
         logits = probe(X_eval_t)
         y_pred = logits.argmax(dim=1).cpu().numpy()
 
+    all_labels = np.arange(n_patients)
     return {
         'n_patients': int(n_patients),
         'n_train_windows': int(len(train_idx)),
@@ -333,11 +344,14 @@ def train_and_eval_probe(
         'n_train_patients': int(len(np.unique(y_cls[train_idx]))),
         'n_eval_patients': int(len(np.unique(y_cls[eval_idx]))),
         'chance_accuracy': float(1.0 / n_patients),
-        'balanced_accuracy': float(balanced_accuracy_score(y_eval, y_pred)),
-        'macro_f1': float(f1_score(y_eval, y_pred, average='macro', zero_division=0)),
+        'balanced_accuracy': float(balanced_accuracy_score(
+            y_eval, y_pred, labels=all_labels)),
+        'macro_f1': float(f1_score(
+            y_eval, y_pred, average='macro', zero_division=0, labels=all_labels)),
         'top1_accuracy': float((y_pred == y_eval).mean()),
         'probe_epochs': int(probe_epochs),
         'probe_device': str(device),
+        'eval_protocol': 'window-level 80/20 split stratified by patient, within one H5 split',
     }
 
 
@@ -368,6 +382,9 @@ def parse_run_spec(spec):
 def main():
     p = argparse.ArgumentParser(description='Patient-identifiability probe')
     p.add_argument('--data_path', required=True)
+    p.add_argument('--split', default='train', choices=['train', 'val', 'test'],
+                   help='Which HDF5 split to use (patients are disjoint across splits; '
+                        'probe train+eval stay within this file only)')
     p.add_argument('--dataset', default='TUSZ', choices=['TUSZ', 'CHBMIT'])
     p.add_argument('--run', action='append', required=True, type=parse_run_spec)
     p.add_argument('--layers', default='final')
@@ -390,7 +407,9 @@ def main():
     device = torch.device(args.device)
     ch_names = TUSZ_CH_NAMES if args.dataset == 'TUSZ' else CHBMIT_CH_NAMES
     input_chans = utils.get_input_chans(ch_names)
-    train_h5 = os.path.join(args.data_path, 'train.h5')
+    train_h5 = os.path.join(args.data_path, f'{args.split}.h5')
+    if not os.path.isfile(train_h5):
+        raise FileNotFoundError(f"Split file not found: {train_h5}")
 
     results = {}
     for run in args.run:
@@ -420,7 +439,7 @@ def main():
                         np.savez_compressed(cache, features=X, patient_ids=y)
 
                 if (y < 0).any():
-                    raise ValueError("patient_ids missing in train.h5")
+                    raise ValueError(f"patient_ids missing in {args.split}.h5")
 
                 metrics = train_and_eval_probe(
                     X, y, device, args.probe, args.probe_test_size, args.seed,
@@ -428,6 +447,7 @@ def main():
                 )
                 metrics.update({
                     'layer': layer,
+                    'split': args.split,
                     'checkpoint': run.checkpoint,
                     'readout': 'channel_attention+fc_norm' if run.model_type == 'adversarial'
                                else 'mean_pool+fc_norm',
