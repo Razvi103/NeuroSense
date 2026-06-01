@@ -4,7 +4,7 @@ Post-hoc patient-identifiability probe for frozen seizure-detector checkpoints.
 Self-contained script: loads checkpoints, extracts internal features, trains a
 fresh linear classifier on patient IDs, and writes JSON results.
 
-Usage:
+TUSZ usage:
     python eval_patient_probe.py \\
         --data_path /path/to/TUSZ \\
         --dataset TUSZ \\
@@ -14,24 +14,43 @@ Usage:
         --layers final,block_3,block_7 \\
         --output patient_probe_results.json
 
+CHB-MIT LOPOCV usage (third field of ``--run`` is the LOPOCV root directory):
+    python eval_patient_probe.py \\
+        --lopocv \\
+        --data_dir /path/to/CHBMIT_per_patient \\
+        --dataset CHBMIT \\
+        --num_workers 8 \\
+        --run "Baseline:baseline:/path/to/finetune_chbmit_baseline_lopocv" \\
+        --run "Single_GRL:adversarial:/path/to/finetune_chbmit_lopo_cv" \\
+        --run "Multi_GRL:adversarial:/path/to/finetune_chbmit_multilayer_lopocv:3,7" \\
+        --layers final,block_3,block_7 \\
+        --output patient_probe_lopocv_results.json
+
 Features are **mean-pooled patch tokens + fc_norm** at every depth (backbone
 only, no channel attention).  Compare Baseline vs single-GRL vs multi-GRL.
 
-Each ``--run`` argument: ``NAME:TYPE:CHECKPOINT[:INTERMEDIATE_LAYERS]``
+Each ``--run`` argument: ``NAME:TYPE:PATH[:INTERMEDIATE_LAYERS]``
   TYPE = baseline | adversarial
+  PATH = checkpoint file (TUSZ) or LOPOCV root dir with fold_XX_chbYY/ subdirs
 
 TUSZ train / dev / test are **patient-disjoint** and use **per-split patient ID
 mappings**.  The probe therefore runs entirely within one HDF5 split (default
 ``train.h5``): extract features, then 80/20 **window** split stratified by
 patient so every patient in that split appears in both probe-train and
 probe-eval.  Do not train on train and evaluate on val/test.
+
+CHB-MIT LOPOCV: per fold, load that fold's checkpoint-best.pth, extract from
+the 23 training patients' per-patient H5s (exclude held-out test patient), run
+the same window-level probe, then aggregate mean +/- std over all folds.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 
 import h5py
@@ -48,6 +67,7 @@ from tqdm import tqdm
 
 import modeling_finetune  # noqa: F401 — registers timm models
 from modeling_finetune import AdversarialNeuralTransformer
+from dataset_maker.dataset_chbmit import MultiPatientAdversarialDataset
 import utils
 
 
@@ -195,13 +215,17 @@ def extract_probe_features(model, x, input_chans, layer='final'):
 
 
 @torch.no_grad()
-def extract_features_from_h5(model, h5_path, input_chans, device, batch_size, layer,
-                             max_windows_per_patient=0, seed=42):
-    dset = H5DatasetWithPIDs(h5_path)
-    loader = DataLoader(dset, batch_size=batch_size, shuffle=False, num_workers=4)
+def extract_features_from_dataset(
+    model, dataset, input_chans, device, batch_size, num_workers, layer,
+    desc='extract', max_windows_per_patient=0, seed=42,
+):
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=device.type == 'cuda',
+    )
 
     all_feats, all_pids = [], []
-    for data, _labels, pids in tqdm(loader, desc=f"{os.path.basename(h5_path)} [{layer}]"):
+    for data, _labels, pids in tqdm(loader, desc=f"{desc} [{layer}]"):
         data = data.to(device) / 100.0
         data = rearrange(data, 'B N (A T) -> B N A T', T=200)
         with torch.amp.autocast('cuda', enabled=device.type == 'cuda'):
@@ -209,7 +233,7 @@ def extract_features_from_h5(model, h5_path, input_chans, device, batch_size, la
         all_feats.append(feats.float().cpu().numpy())
         all_pids.append(pids.numpy())
 
-    dset.close()
+    dataset.close()
     X = np.concatenate(all_feats)
     y = np.concatenate(all_pids)
 
@@ -225,6 +249,30 @@ def extract_features_from_h5(model, h5_path, input_chans, device, batch_size, la
         X, y = X[keep], y[keep]
 
     return X, y
+
+
+def extract_features_from_h5(
+    model, h5_path, input_chans, device, batch_size, num_workers, layer,
+    max_windows_per_patient=0, seed=42,
+):
+    dset = H5DatasetWithPIDs(h5_path)
+    return extract_features_from_dataset(
+        model, dset, input_chans, device, batch_size, num_workers, layer,
+        desc=os.path.basename(h5_path),
+        max_windows_per_patient=max_windows_per_patient, seed=seed,
+    )
+
+
+def extract_features_from_train_paths(
+    model, train_paths, input_chans, device, batch_size, num_workers, layer,
+    max_windows_per_patient=0, seed=42,
+):
+    dset = MultiPatientAdversarialDataset(train_paths)
+    return extract_features_from_dataset(
+        model, dset, input_chans, device, batch_size, num_workers, layer,
+        desc=f"{len(train_paths)} patients",
+        max_windows_per_patient=max_windows_per_patient, seed=seed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -345,61 +393,192 @@ def train_and_eval_probe(
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# LOPOCV helpers
 # ---------------------------------------------------------------------------
 
-@dataclass
-class RunConfig:
-    name: str
-    model_type: str
-    checkpoint: str
-    intermediate_layers: str = ''
+PROBE_METRIC_KEYS = (
+    'balanced_accuracy', 'macro_f1', 'top1_accuracy', 'chance_accuracy',
+    'n_patients', 'n_train_windows', 'n_eval_windows',
+)
 
 
-def parse_run_spec(spec):
-    parts = spec.split(':')
-    if len(parts) < 3:
-        raise argparse.ArgumentTypeError(
-            f"Expected NAME:TYPE:CHECKPOINT[:INTERMEDIATE], got {spec!r}"
-        )
-    name, model_type, checkpoint = parts[0], parts[1], parts[2]
-    if model_type not in ('baseline', 'adversarial'):
-        raise argparse.ArgumentTypeError(f"TYPE must be baseline or adversarial, got {model_type!r}")
-    return RunConfig(name, model_type, checkpoint, parts[3] if len(parts) > 3 else '')
+def discover_patient_h5s(data_dir):
+    """Return sorted {patient_id: h5_path} from chb*.h5 files."""
+    paths = sorted(glob.glob(os.path.join(data_dir, 'chb*.h5')))
+    return {
+        os.path.splitext(os.path.basename(p))[0]: p
+        for p in paths
+    }
 
 
-def main():
-    p = argparse.ArgumentParser(description='Patient-identifiability probe')
-    p.add_argument('--data_path', required=True)
-    p.add_argument('--split', default='train', choices=['train', 'val', 'test'],
-                   help='Which HDF5 split to use (patients are disjoint across splits; '
-                        'probe train+eval stay within this file only)')
-    p.add_argument('--dataset', default='TUSZ', choices=['TUSZ', 'CHBMIT'])
-    p.add_argument('--run', action='append', required=True, type=parse_run_spec)
-    p.add_argument('--layers', default='final')
-    p.add_argument('--output', default='patient_probe_results.json')
-    p.add_argument('--cache_dir', default='')
-    p.add_argument('--model', default='labram_base_patch200_200')
-    p.add_argument('--adv_hidden_dim', default=512, type=int)
-    p.add_argument('--batch_size', default=2048, type=int)
-    p.add_argument('--device', default='cuda')
-    p.add_argument('--probe', default='logistic', choices=['logistic', 'mlp'])
-    p.add_argument('--probe_epochs', default=50, type=int)
-    p.add_argument('--probe_lr', default=1e-2, type=float)
-    p.add_argument('--probe_batch_size', default=8192, type=int)
-    p.add_argument('--probe_test_size', default=0.2, type=float)
-    p.add_argument('--max_windows_per_patient', default=0, type=int)
-    p.add_argument('--seed', default=42, type=int)
-    args = p.parse_args()
+def discover_lopocv_folds(lopocv_dir, fold_filter=None):
+    """Discover LOPOCV folds with checkpoint-best.pth under lopocv_dir."""
+    folds = []
+    if not os.path.isdir(lopocv_dir):
+        raise FileNotFoundError(f"LOPOCV directory not found: {lopocv_dir}")
 
-    layers = [s.strip() for s in args.layers.split(',') if s.strip()]
-    device = torch.device(args.device)
-    ch_names = TUSZ_CH_NAMES if args.dataset == 'TUSZ' else CHBMIT_CH_NAMES
-    input_chans = utils.get_input_chans(ch_names)
-    train_h5 = os.path.join(args.data_path, f'{args.split}.h5')
-    if not os.path.isfile(train_h5):
-        raise FileNotFoundError(f"Split file not found: {train_h5}")
+    for entry in sorted(os.listdir(lopocv_dir)):
+        m = re.match(r'fold_(\d+)_(chb\d+)', entry)
+        if not m:
+            continue
+        fold_idx = int(m.group(1))
+        test_pid = m.group(2)
+        fold_dir = os.path.join(lopocv_dir, entry)
+        ckpt_path = os.path.join(fold_dir, 'checkpoint-best.pth')
+        if os.path.isfile(ckpt_path):
+            folds.append((fold_idx, test_pid, fold_dir, ckpt_path))
 
+    if fold_filter is not None:
+        folds = [f for f in folds if f[0] in fold_filter]
+
+    return folds
+
+
+def build_train_paths(patient_h5s, test_pid):
+    """Return H5 paths for all patients except the held-out test patient."""
+    if test_pid not in patient_h5s:
+        raise KeyError(f"Test patient {test_pid} not found in data_dir")
+    return [p for pid, p in sorted(patient_h5s.items()) if pid != test_pid]
+
+
+def cache_is_valid(cache_path, ckpt_path):
+    """True if cache exists and is newer than the checkpoint."""
+    if not os.path.isfile(cache_path):
+        return False
+    return os.path.getmtime(cache_path) >= os.path.getmtime(ckpt_path)
+
+
+def aggregate_fold_metrics(per_fold):
+    """Compute mean/std over numeric probe metrics across folds."""
+    aggregate = {}
+    for key in PROBE_METRIC_KEYS:
+        values = [
+            float(r[key]) for r in per_fold
+            if key in r and r[key] is not None and not isinstance(r[key], str)
+        ]
+        if values:
+            aggregate[key] = {
+                'mean': float(np.mean(values)),
+                'std': float(np.std(values)),
+                'min': float(np.min(values)),
+                'max': float(np.max(values)),
+            }
+    return aggregate
+
+
+def run_lopocv_probe(args, layers, device, input_chans, patient_h5s):
+    """Run patient probe across LOPOCV folds for each run config and layer."""
+    fold_filter = None
+    if args.folds:
+        fold_filter = {int(x.strip()) for x in args.folds.split(',') if x.strip()}
+
+    results = {}
+    for run in args.run:
+        results[run.name] = {}
+        lopocv_dir = run.checkpoint
+        folds = discover_lopocv_folds(lopocv_dir, fold_filter)
+        if not folds:
+            raise FileNotFoundError(f"No LOPOCV folds found in {lopocv_dir}")
+
+        print(f"\n[{run.name}] LOPOCV root ← {lopocv_dir}  ({len(folds)} folds)")
+
+        for layer in layers:
+            print(f"  layer={layer}")
+            safe = run.name.replace(' ', '_').replace('+', 'p')
+            per_fold = []
+
+            for fold_idx, test_pid, fold_dir, ckpt_path in folds:
+                if test_pid not in patient_h5s:
+                    print(f"    fold {fold_idx:02d} {test_pid}: skipped (no H5)")
+                    continue
+
+                train_paths = build_train_paths(patient_h5s, test_pid)
+                expected_train = len(patient_h5s) - 1
+                if len(train_paths) != expected_train:
+                    print(f"    Warning: fold {fold_idx:02d} has {len(train_paths)} "
+                          f"train H5s (expected {expected_train})")
+
+                cache_path = ''
+                if args.cache_dir:
+                    cache_path = os.path.join(
+                        args.cache_dir, safe,
+                        f"fold_{fold_idx:02d}_{test_pid}_{layer}.npz",
+                    )
+
+                print(f"    fold {fold_idx:02d} {test_pid} "
+                      f"({len(train_paths)} train patients)")
+
+                try:
+                    if cache_path and cache_is_valid(cache_path, ckpt_path):
+                        d = np.load(cache_path)
+                        X, y = d['features'], d['patient_ids']
+                    else:
+                        model = load_checkpoint(
+                            ckpt_path, args.model, run.model_type == 'adversarial',
+                            args.adv_hidden_dim, run.intermediate_layers, device,
+                        )
+                        X, y = extract_features_from_train_paths(
+                            model, train_paths, input_chans, device,
+                            args.batch_size, args.num_workers, layer,
+                            args.max_windows_per_patient, args.seed,
+                        )
+                        del model
+                        if device.type == 'cuda':
+                            torch.cuda.empty_cache()
+
+                        if cache_path:
+                            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                            np.savez_compressed(cache_path, features=X, patient_ids=y)
+
+                    if (y < 0).any():
+                        raise ValueError("patient_ids missing in train H5 files")
+
+                    metrics = train_and_eval_probe(
+                        X, y, device, args.probe, args.probe_test_size, args.seed,
+                        args.probe_epochs, args.probe_lr, args.probe_batch_size,
+                    )
+                    metrics.update({
+                        'fold': fold_idx,
+                        'test_patient': test_pid,
+                        'layer': layer,
+                        'checkpoint': ckpt_path,
+                        'n_train_h5_files': len(train_paths),
+                        'readout': 'mean_pool+fc_norm',
+                        'eval_protocol': (
+                            'LOPOCV: 23 train patients, window-level 80/20 split '
+                            'stratified by patient'
+                        ),
+                    })
+                    per_fold.append(metrics)
+                    print(f"      balanced_acc={metrics['balanced_accuracy']:.4f}  "
+                          f"(chance={metrics['chance_accuracy']:.4f})")
+                except Exception as exc:
+                    per_fold.append({
+                        'fold': fold_idx,
+                        'test_patient': test_pid,
+                        'error': str(exc),
+                    })
+                    print(f"      ERROR: {exc}")
+
+            aggregate = aggregate_fold_metrics(
+                [r for r in per_fold if 'error' not in r]
+            )
+            results[run.name][layer] = {
+                'per_fold': per_fold,
+                'aggregate': aggregate,
+                'n_folds': len(per_fold),
+                'n_successful_folds': len([r for r in per_fold if 'error' not in r]),
+            }
+            if aggregate.get('balanced_accuracy'):
+                agg = aggregate['balanced_accuracy']
+                print(f"    aggregate balanced_acc={agg['mean']:.4f} "
+                      f"+/- {agg['std']:.4f}")
+
+    return results
+
+
+def run_single_h5_probe(args, layers, device, input_chans, train_h5):
+    """Run patient probe on a single HDF5 split (TUSZ / CHBMIT monolithic H5)."""
     results = {}
     for run in args.run:
         results[run.name] = {}
@@ -415,12 +594,14 @@ def main():
             cache = os.path.join(args.cache_dir, f"{safe}_{layer}.npz") if args.cache_dir else ''
 
             try:
-                if cache and os.path.isfile(cache):
+                ckpt_mtime = os.path.getmtime(run.checkpoint) if os.path.isfile(run.checkpoint) else 0
+                if cache and os.path.isfile(cache) and os.path.getmtime(cache) >= ckpt_mtime:
                     d = np.load(cache)
                     X, y = d['features'], d['patient_ids']
                 else:
                     X, y = extract_features_from_h5(
-                        model, train_h5, input_chans, device, args.batch_size, layer,
+                        model, train_h5, input_chans, device, args.batch_size,
+                        args.num_workers, layer,
                         args.max_windows_per_patient, args.seed,
                     )
                     if cache:
@@ -450,6 +631,90 @@ def main():
         del model
         if device.type == 'cuda':
             torch.cuda.empty_cache()
+
+    return results
+
+@dataclass
+class RunConfig:
+    name: str
+    model_type: str
+    checkpoint: str
+    intermediate_layers: str = ''
+
+
+def parse_run_spec(spec):
+    parts = spec.split(':')
+    if len(parts) < 3:
+        raise argparse.ArgumentTypeError(
+            f"Expected NAME:TYPE:CHECKPOINT[:INTERMEDIATE], got {spec!r}"
+        )
+    name, model_type, checkpoint = parts[0], parts[1], parts[2]
+    if model_type not in ('baseline', 'adversarial'):
+        raise argparse.ArgumentTypeError(f"TYPE must be baseline or adversarial, got {model_type!r}")
+    return RunConfig(name, model_type, checkpoint, parts[3] if len(parts) > 3 else '')
+
+
+def main():
+    p = argparse.ArgumentParser(description='Patient-identifiability probe')
+    p.add_argument('--data_path', default='',
+                   help='Dir with train.h5 / val.h5 / test.h5 (TUSZ or monolithic CHBMIT)')
+    p.add_argument('--data_dir', default='',
+                   help='Dir with per-patient chb*.h5 files (required for --lopocv)')
+    p.add_argument('--lopocv', action='store_true',
+                   help='LOPOCV mode: --run PATH is LOPOCV root with fold_XX_chbYY/ subdirs')
+    p.add_argument('--folds', default='', type=str,
+                   help='Comma-separated fold indices (LOPOCV only; default: all)')
+    p.add_argument('--split', default='train', choices=['train', 'val', 'test'],
+                   help='Which HDF5 split to use (single-H5 mode only)')
+    p.add_argument('--dataset', default='TUSZ', choices=['TUSZ', 'CHBMIT'])
+    p.add_argument('--run', action='append', required=True, type=parse_run_spec)
+    p.add_argument('--layers', default='final')
+    p.add_argument('--output', default='patient_probe_results.json')
+    p.add_argument('--cache_dir', default='')
+    p.add_argument('--model', default='labram_base_patch200_200')
+    p.add_argument('--adv_hidden_dim', default=512, type=int)
+    p.add_argument('--batch_size', default=2048, type=int)
+    p.add_argument('--num_workers', default=8, type=int,
+                   help='DataLoader workers for feature extraction')
+    p.add_argument('--device', default='cuda')
+    p.add_argument('--probe', default='logistic', choices=['logistic', 'mlp'])
+    p.add_argument('--probe_epochs', default=50, type=int)
+    p.add_argument('--probe_lr', default=1e-2, type=float)
+    p.add_argument('--probe_batch_size', default=8192, type=int)
+    p.add_argument('--probe_test_size', default=0.2, type=float)
+    p.add_argument('--max_windows_per_patient', default=0, type=int)
+    p.add_argument('--seed', default=42, type=int)
+    args = p.parse_args()
+
+    if args.lopocv:
+        if not args.data_dir:
+            p.error('--data_dir is required when --lopocv is set')
+        if args.data_path:
+            p.error('Use --data_dir (not --data_path) in --lopocv mode')
+        if args.dataset != 'CHBMIT':
+            print("Warning: --lopocv is intended for CHBMIT per-patient H5s")
+    else:
+        if not args.data_path:
+            p.error('--data_path is required unless --lopocv is set')
+        if args.data_dir:
+            p.error('Use --data_path (not --data_dir) outside --lopocv mode')
+
+    layers = [s.strip() for s in args.layers.split(',') if s.strip()]
+    device = torch.device(args.device)
+    ch_names = TUSZ_CH_NAMES if args.dataset == 'TUSZ' else CHBMIT_CH_NAMES
+    input_chans = utils.get_input_chans(ch_names)
+
+    if args.lopocv:
+        patient_h5s = discover_patient_h5s(args.data_dir)
+        if not patient_h5s:
+            raise FileNotFoundError(f"No chb*.h5 files in {args.data_dir}")
+        print(f"Discovered {len(patient_h5s)} patients in {args.data_dir}")
+        results = run_lopocv_probe(args, layers, device, input_chans, patient_h5s)
+    else:
+        train_h5 = os.path.join(args.data_path, f'{args.split}.h5')
+        if not os.path.isfile(train_h5):
+            raise FileNotFoundError(f"Split file not found: {train_h5}")
+        results = run_single_h5_probe(args, layers, device, input_chans, train_h5)
 
     settings = vars(args).copy()
     settings['run'] = [asdict(r) for r in args.run]
