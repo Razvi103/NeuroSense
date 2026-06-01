@@ -336,7 +336,6 @@ def train_and_eval_probe(
         logits = probe(X_eval_t)
         y_pred = logits.argmax(dim=1).cpu().numpy()
 
-    all_labels = np.arange(n_patients)
     return {
         'n_patients': int(n_patients),
         'n_train_windows': int(len(train_idx)),
@@ -344,10 +343,9 @@ def train_and_eval_probe(
         'n_train_patients': int(len(np.unique(y_cls[train_idx]))),
         'n_eval_patients': int(len(np.unique(y_cls[eval_idx]))),
         'chance_accuracy': float(1.0 / n_patients),
-        'balanced_accuracy': float(balanced_accuracy_score(
-            y_eval, y_pred, labels=all_labels)),
+        'balanced_accuracy': float(balanced_accuracy_score(y_eval, y_pred)),
         'macro_f1': float(f1_score(
-            y_eval, y_pred, average='macro', zero_division=0, labels=all_labels)),
+            y_eval, y_pred, average='macro', zero_division=0)),
         'top1_accuracy': float((y_pred == y_eval).mean()),
         'probe_epochs': int(probe_epochs),
         'probe_device': str(device),
