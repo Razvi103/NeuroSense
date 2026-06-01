@@ -29,14 +29,13 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import torch
+import torch.nn as nn
 from einops import rearrange
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, f1_score
 from sklearn.model_selection import GroupShuffleSplit
-from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from timm.models import create_model
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm import tqdm
 
 import modeling_finetune  # noqa: F401 — registers timm models
@@ -232,46 +231,113 @@ def extract_features_from_h5(model, h5_path, input_chans, device, batch_size, la
 
 
 # ---------------------------------------------------------------------------
-# Probe train / eval
+# Probe train / eval (GPU)
 # ---------------------------------------------------------------------------
 
-def train_and_eval_probe(X, y, probe_type='logistic', test_size=0.2, seed=42):
-    n_patients = len(np.unique(y))
+class LinearProbe(nn.Module):
+    def __init__(self, in_dim, n_classes):
+        super().__init__()
+        self.fc = nn.Linear(in_dim, n_classes)
+
+    def forward(self, x):
+        return self.fc(x)
+
+
+class MLPProbe(nn.Module):
+    def __init__(self, in_dim, n_classes, hidden_dim=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim // 2, n_classes),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def _balanced_class_weights(y, n_classes, device):
+    """Inverse-frequency weights matching sklearn class_weight='balanced'."""
+    counts = np.bincount(y, minlength=n_classes).astype(np.float64)
+    counts = np.maximum(counts, 1.0)
+    weights = len(y) / (n_classes * counts)
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
+def _build_probe(probe_type, in_dim, n_classes):
+    if probe_type == 'logistic':
+        return LinearProbe(in_dim, n_classes)
+    if probe_type == 'mlp':
+        return MLPProbe(in_dim, n_classes)
+    raise ValueError(f"Unknown probe type: {probe_type}")
+
+
+def train_and_eval_probe(
+    X, y, device, probe_type='logistic', test_size=0.2, seed=42,
+    probe_epochs=50, probe_lr=1e-2, probe_batch_size=8192,
+):
+    unique_ids = np.unique(y)
+    n_patients = len(unique_ids)
     if n_patients < 2:
         raise ValueError(f"Need >= 2 patients, got {n_patients}")
 
+    id_to_class = {pid: i for i, pid in enumerate(unique_ids)}
+    y_cls = np.array([id_to_class[pid] for pid in y], dtype=np.int64)
+
     train_idx, eval_idx = next(GroupShuffleSplit(
         n_splits=1, test_size=test_size, random_state=seed,
-    ).split(X, y, groups=y))
+    ).split(X, y_cls, groups=y_cls))
 
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X[train_idx])
-    X_eval = scaler.transform(X[eval_idx])
-    y_train, y_eval = y[train_idx], y[eval_idx]
+    X_train = scaler.fit_transform(X[train_idx]).astype(np.float32)
+    X_eval = scaler.transform(X[eval_idx]).astype(np.float32)
+    y_train = y_cls[train_idx]
+    y_eval = y_cls[eval_idx]
 
-    if probe_type == 'logistic':
-        probe = LogisticRegression(
-            multi_class='multinomial', max_iter=2000,
-            class_weight='balanced', random_state=seed,
-        )
-    else:
-        probe = MLPClassifier(
-            hidden_layer_sizes=(256, 128), max_iter=500,
-            early_stopping=True, random_state=seed,
-        )
-    probe.fit(X_train, y_train)
-    y_pred = probe.predict(X_eval)
+    X_train_t = torch.from_numpy(X_train).to(device)
+    y_train_t = torch.from_numpy(y_train).to(device)
+    X_eval_t = torch.from_numpy(X_eval).to(device)
+
+    probe = _build_probe(probe_type, X_train.shape[1], n_patients).to(device)
+    class_weights = _balanced_class_weights(y_train, n_patients, device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = torch.optim.Adam(probe.parameters(), lr=probe_lr)
+
+    train_loader = DataLoader(
+        TensorDataset(X_train_t, y_train_t),
+        batch_size=probe_batch_size,
+        shuffle=True,
+    )
+
+    probe.train()
+    for epoch in tqdm(range(probe_epochs), desc='probe train', leave=False):
+        for xb, yb in train_loader:
+            optimizer.zero_grad(set_to_none=True)
+            loss = criterion(probe(xb), yb)
+            loss.backward()
+            optimizer.step()
+
+    probe.eval()
+    with torch.no_grad():
+        logits = probe(X_eval_t)
+        y_pred = logits.argmax(dim=1).cpu().numpy()
 
     return {
         'n_patients': int(n_patients),
         'n_train_windows': int(len(train_idx)),
         'n_eval_windows': int(len(eval_idx)),
-        'n_train_patients': int(len(np.unique(y[train_idx]))),
-        'n_eval_patients': int(len(np.unique(y[eval_idx]))),
+        'n_train_patients': int(len(np.unique(y_cls[train_idx]))),
+        'n_eval_patients': int(len(np.unique(y_cls[eval_idx]))),
         'chance_accuracy': float(1.0 / n_patients),
         'balanced_accuracy': float(balanced_accuracy_score(y_eval, y_pred)),
         'macro_f1': float(f1_score(y_eval, y_pred, average='macro', zero_division=0)),
         'top1_accuracy': float((y_pred == y_eval).mean()),
+        'probe_epochs': int(probe_epochs),
+        'probe_device': str(device),
     }
 
 
@@ -312,6 +378,9 @@ def main():
     p.add_argument('--batch_size', default=2048, type=int)
     p.add_argument('--device', default='cuda')
     p.add_argument('--probe', default='logistic', choices=['logistic', 'mlp'])
+    p.add_argument('--probe_epochs', default=50, type=int)
+    p.add_argument('--probe_lr', default=1e-2, type=float)
+    p.add_argument('--probe_batch_size', default=8192, type=int)
     p.add_argument('--probe_test_size', default=0.2, type=float)
     p.add_argument('--max_windows_per_patient', default=0, type=int)
     p.add_argument('--seed', default=42, type=int)
@@ -353,7 +422,10 @@ def main():
                 if (y < 0).any():
                     raise ValueError("patient_ids missing in train.h5")
 
-                metrics = train_and_eval_probe(X, y, args.probe, args.probe_test_size, args.seed)
+                metrics = train_and_eval_probe(
+                    X, y, device, args.probe, args.probe_test_size, args.seed,
+                    args.probe_epochs, args.probe_lr, args.probe_batch_size,
+                )
                 metrics.update({
                     'layer': layer,
                     'checkpoint': run.checkpoint,
