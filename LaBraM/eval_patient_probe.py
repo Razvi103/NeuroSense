@@ -267,18 +267,9 @@ def extract_features_from_train_paths(
     model, train_paths, input_chans, device, batch_size, num_workers, layer,
     max_windows_per_patient=0, seed=42,
 ):
-    """Extract from all train H5s in one pass.
-
-    h5py is not fork-safe: MultiPatientAdversarialDataset keeps all files open,
-    so DataLoader workers must be 0 (otherwise extraction is fast but worker
-    teardown hangs for minutes).
-    """
-    if num_workers > 0:
-        print(f"    Note: LOPOCV multi-H5 extraction uses num_workers=0 "
-              f"(h5py + fork hang with {num_workers} workers)")
     dset = MultiPatientAdversarialDataset(train_paths)
     return extract_features_from_dataset(
-        model, dset, input_chans, device, batch_size, 0, layer,
+        model, dset, input_chans, device, batch_size, num_workers, layer,
         desc=f"{len(train_paths)} patients",
         max_windows_per_patient=max_windows_per_patient, seed=seed,
     )
