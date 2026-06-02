@@ -232,7 +232,15 @@ def extract_all_layers_features(backbone, x, input_chans, layer_specs):
         x[:, 1:, :] += time_embed
     x = backbone.pos_drop(x)
 
-    def readout(h):
+    # Intermediate taps must match the space the auxiliary discriminators were
+    # trained on: raw mean-pooled patch tokens (CLS dropped), no norm. The
+    # final tap keeps fc_norm, the representation the final-layer head/discriminator
+    # operates on. backbone.norm is Identity in this config; fc_norm is the real
+    # LayerNorm and is the only readout difference between the two.
+    def readout_intermediate(h):
+        return h[:, 1:, :].mean(dim=1)
+
+    def readout_final(h):
         tokens = backbone.norm(h)[:, 1:, :]
         return backbone.fc_norm(tokens.mean(dim=1))
 
@@ -241,9 +249,9 @@ def extract_all_layers_features(backbone, x, input_chans, layer_specs):
     for i, blk in enumerate(backbone.blocks):
         x = blk(x, rel_pos_bias=None)
         if i in block_taps:
-            out[block_taps[i]] = readout(x)
+            out[block_taps[i]] = readout_intermediate(x)
         if i == last and want_final:
-            out['final'] = readout(x)
+            out['final'] = readout_final(x)
     return out
 
 
