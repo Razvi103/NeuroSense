@@ -1,4 +1,3 @@
-# --------------------------------------------------------
 # Large Brain Model for Learning Generic Representations with Tremendous EEG Data in BCI
 # By Wei-Bang Jiang
 # Based on BEiT-v2, timm, DeiT, and DINO code bases
@@ -6,8 +5,7 @@
 # https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # https://github.com/facebookresearch/deit/
 # https://github.com/facebookresearch/dino
-# ---------------------------------------------------------
-
+# added for MIDAS: GradientReversalFunction, GradientReversalLayer, ChannelAttention, PatientDiscriminator, and AdversarialNeuralTransformer
 import math
 from functools import partial
 
@@ -463,13 +461,9 @@ class NeuralTransformer(nn.Module):
         return features
 
 
-# ---------------------------------------------------------------------------
-#  Adversarial representation learning components
-# ---------------------------------------------------------------------------
+# adversarial representation learning components
 
 class GradientReversalFunction(torch.autograd.Function):
-    """Negates gradients in the backward pass, scaled by lambda_."""
-
     @staticmethod
     def forward(ctx, x, lambda_):
         ctx.lambda_ = lambda_
@@ -493,12 +487,6 @@ class GradientReversalLayer(nn.Module):
 
 
 class ChannelAttention(nn.Module):
-    """
-    Learns per-channel importance weights from transformer patch tokens.
-    Input:  patch tokens (B, N_channels * N_time, D)
-    Output: attention-weighted pooled representation (B, D)
-    """
-
     def __init__(self, embed_dim, reduction=4):
         super().__init__()
         self.attn_mlp = nn.Sequential(
@@ -509,20 +497,15 @@ class ChannelAttention(nn.Module):
 
     def forward(self, patch_tokens, n_channels, n_time):
         B, N, D = patch_tokens.shape
-        # (B, n_channels, n_time, D)
         x = patch_tokens.view(B, n_channels, n_time, D)
-        # per-channel feature: average over time patches
-        chan_feat = x.mean(dim=2)  # (B, n_channels, D)
-        # attention scores
-        scores = self.attn_mlp(chan_feat)  # (B, n_channels, 1)
-        weights = torch.softmax(scores, dim=1)  # (B, n_channels, 1)
-        # weighted sum of per-channel features
-        pooled = (chan_feat * weights).sum(dim=1)  # (B, D)
+        chan_feat = x.mean(dim=2) 
+        scores = self.attn_mlp(chan_feat) 
+        weights = torch.softmax(scores, dim=1) 
+        pooled = (chan_feat * weights).sum(dim=1) 
         return pooled, weights.squeeze(-1)
 
 
 class PatientDiscriminator(nn.Module):
-    """MLP that predicts patient identity from features."""
 
     def __init__(self, embed_dim, num_patients, hidden_dim=256, dropout=0.3):
         super().__init__()
@@ -541,18 +524,6 @@ class PatientDiscriminator(nn.Module):
 
 
 class AdversarialNeuralTransformer(nn.Module):
-    """
-    Wraps a pre-trained NeuralTransformer backbone with:
-    - Channel attention (replaces default mean pooling)
-    - Gradient reversal layer + patient discriminator
-    - Optional multi-layer adversarial heads via forward hooks
-
-    During training with intermediate_layers:
-        returns (seizure_logits, patient_logits, aux_patient_logits_dict)
-    During training without intermediate_layers (backward compat):
-        returns (seizure_logits, patient_logits)
-    During eval: returns seizure_logits only
-    """
 
     def __init__(self, backbone, num_patients, adv_hidden_dim=256,
                  intermediate_layers=()):
@@ -573,7 +544,6 @@ class AdversarialNeuralTransformer(nn.Module):
         trunc_normal_(self.seizure_head.weight, std=0.02)
         nn.init.constant_(self.seizure_head.bias, 0)
 
-        # Multi-layer adversarial heads (hook-based, zero backbone changes)
         self._intermediate_features = {}
         self.aux_grls = nn.ModuleDict()
         self.aux_discriminators = nn.ModuleDict()
@@ -590,7 +560,6 @@ class AdversarialNeuralTransformer(nn.Module):
             )
 
     def _make_hook(self, layer_idx):
-        """Return a hook that stores mean-pooled patch tokens (CLS excluded)."""
         def _hook(_module, _input, output):
             self._intermediate_features[layer_idx] = output[:, 1:, :].mean(dim=1)
         return _hook
@@ -622,12 +591,12 @@ class AdversarialNeuralTransformer(nn.Module):
 
         patch_tokens = self.backbone.forward_features(
             x, input_chans=input_chans, return_patch_tokens=True,
-        )  # (B, n_channels * n_time, D)
+        )
 
         pooled, attn_weights = self.channel_attention(
             patch_tokens, n_channels, n_time,
         )
-        features = self.fc_norm(pooled)  # (B, D)
+        features = self.fc_norm(pooled)
 
         seizure_logits = self.seizure_head(features)
 
@@ -649,9 +618,7 @@ class AdversarialNeuralTransformer(nn.Module):
         return seizure_logits
 
 
-# ---------------------------------------------------------------------------
-#  Model registry
-# ---------------------------------------------------------------------------
+# model registry
 
 @register_model
 def labram_base_patch200_200(pretrained=False, **kwargs):

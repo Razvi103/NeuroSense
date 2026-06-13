@@ -1,21 +1,3 @@
-"""
-Train and evaluate ScoreNet per LOPOCV fold using existing LaBraM checkpoints.
-
-For each fold directory (fold_00_chb01/, fold_01_chb02/, ...):
-  1. Load the adversarial LaBraM checkpoint
-  2. Extract probabilities from the 23 training patients
-  3. Extract probabilities from the 1 held-out test patient
-  4. Train ScoreNet on the training probabilities
-  5. Evaluate ScoreNet on the test patient
-  6. Save per-fold results and aggregate mean +/- std
-
-Usage:
-    python run_scorenet_lopocv.py \
-        --lopocv_dir /path/to/lopocv_results \
-        --data_dir /path/to/CHBMIT_per_patient \
-        --sn_epochs 200 --sn_lr 1e-2
-"""
-
 import argparse
 import glob
 import json
@@ -57,25 +39,18 @@ CHBMIT_CH_NAMES = [
 
 
 def get_args():
-    p = argparse.ArgumentParser('ScoreNet LOPOCV using existing fold checkpoints')
+    p = argparse.ArgumentParser()
 
-    p.add_argument('--lopocv_dir', required=True, type=str,
-                   help='Root LOPOCV directory containing fold_XX_chbYY/ subdirs')
-    p.add_argument('--data_dir', required=True, type=str,
-                   help='Directory with per-patient H5 files (chb01.h5, ...)')
-    p.add_argument('--folds', default='', type=str,
-                   help='Comma-separated fold indices to process (default: all)')
+    p.add_argument('--lopocv_dir', required=True, type=str)
+    p.add_argument('--data_dir', required=True, type=str)
+    p.add_argument('--folds', default='', type=str)
 
-    # LaBraM model config (must match what was used for training)
     p.add_argument('--model', default='labram_base_patch200_200', type=str)
     p.add_argument('--adv_hidden_dim', default=512, type=int)
     p.add_argument('--drop_path', default=0.2, type=float)
-    p.add_argument('--intermediate_layers', default='', type=str,
-                   help='Comma-separated block indices (must match training config)')
-    p.add_argument('--batch_size', default=2048, type=int,
-                   help='Batch size for probability extraction')
+    p.add_argument('--intermediate_layers', default='', type=str)
+    p.add_argument('--batch_size', default=2048, type=int)
 
-    # ScoreNet
     p.add_argument('--sn_epochs', default=200, type=int)
     p.add_argument('--sn_lr', default=1e-2, type=float)
     p.add_argument('--sn_w', default=6, type=int)
@@ -91,12 +66,7 @@ def get_args():
     return p.parse_args()
 
 
-# ---------------------------------------------------------------------------
-#  Model loading
-# ---------------------------------------------------------------------------
-
 def load_fold_model(checkpoint_path, args, device):
-    """Load a LaBraM model from a fold checkpoint (adversarial or baseline)."""
     backbone = create_model(
         args.model, pretrained=False, num_classes=1,
         drop_rate=0.0, drop_path_rate=args.drop_path, use_mean_pooling=True,
@@ -122,34 +92,23 @@ def load_fold_model(checkpoint_path, args, device):
             intermediate_layers=intermediate,
         )
 
-        if 'seizure_head.0.weight' in clean_state:
-            model.seizure_head = torch.nn.Sequential(
-                torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
-                torch.nn.GELU(),
-                torch.nn.Dropout(0.2),
-                torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
-            )
-            print("  Detected adversarial checkpoint (2-layer MLP seizure head)")
-        else:
-            print("  Detected adversarial checkpoint (single-layer seizure head)")
+        model.seizure_head = torch.nn.Sequential(
+            torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
+        )
 
         model.load_state_dict(clean_state, strict=False)
     else:
         backbone.load_state_dict(clean_state, strict=False)
         model = backbone
-        print("  Detected baseline checkpoint")
 
     model.to(device).eval()
     return model
 
-
-# ---------------------------------------------------------------------------
-#  Probability extraction
-# ---------------------------------------------------------------------------
-
 @torch.no_grad()
 def extract_probs_from_dataset(model, dataset, device, batch_size, num_workers):
-    """Run frozen model on a MultiPatientAdversarialDataset, return probs/labels/pids."""
     input_chans = utils.get_input_chans(CHBMIT_CH_NAMES)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=True, drop_last=False)
@@ -172,12 +131,7 @@ def extract_probs_from_dataset(model, dataset, device, batch_size, num_workers):
     return np.concatenate(all_probs), np.concatenate(all_labels), np.concatenate(all_pids)
 
 
-# ---------------------------------------------------------------------------
-#  ScoreNet training (in-memory, no .npz files needed)
-# ---------------------------------------------------------------------------
-
 def build_scorenet_items(probs, labels, pids, w, max_len):
-    """Build Toeplitz items per patient (same logic as ProbSequenceDataset)."""
     items = []
     for pid in np.unique(pids):
         mask = pids == pid
@@ -213,7 +167,6 @@ class InMemoryScoreNetDataset(torch.utils.data.Dataset):
 
 
 def train_scorenet_fold(train_items, args, device):
-    """Train ScoreNet on extracted training probabilities, return best model."""
     train_ds = InMemoryScoreNetDataset(train_items)
     train_loader = DataLoader(
         train_ds, batch_size=args.sn_batch_size, shuffle=True,
@@ -255,11 +208,6 @@ def train_scorenet_fold(train_items, args, device):
     model.load_state_dict(best_state)
     model.to(device).eval()
     return model, best_loss
-
-
-# ---------------------------------------------------------------------------
-#  Evaluation
-# ---------------------------------------------------------------------------
 
 def get_events(binary_arr):
     if len(binary_arr) == 0:
@@ -309,7 +257,6 @@ def compute_event_metrics(y_true, y_pred, stride_sec=1.0):
 
 @torch.no_grad()
 def evaluate_scorenet(sn_model, test_probs, test_labels, device, threshold, min_dur):
-    """Evaluate ScoreNet on one patient's raw probabilities."""
     w = sn_model.w
     Z = build_toeplitz(test_probs.astype(np.float32), w)
     Z_t = torch.from_numpy(Z).to(device)
@@ -343,12 +290,7 @@ def evaluate_scorenet(sn_model, test_probs, test_labels, device, threshold, min_
     return results
 
 
-# ---------------------------------------------------------------------------
-#  Fold discovery
-# ---------------------------------------------------------------------------
-
 def discover_folds(lopocv_dir):
-    """Find fold directories and parse (fold_idx, test_pid, checkpoint_path)."""
     folds = []
     for entry in sorted(os.listdir(lopocv_dir)):
         m = re.match(r'fold_(\d+)_(chb\d+)', entry)
@@ -367,70 +309,38 @@ def discover_folds(lopocv_dir):
 
 
 def discover_patients(data_dir):
-    """Find all per-patient H5 files, return dict pid -> h5_path."""
     h5_files = sorted(glob.glob(os.path.join(data_dir, 'chb*.h5')))
     return {os.path.splitext(os.path.basename(p))[0]: p for p in h5_files}
 
 
-# ---------------------------------------------------------------------------
-#  Main
-# ---------------------------------------------------------------------------
-
 def process_fold(fold_idx, test_pid, fold_dir, ckpt_path, patient_h5s, args, device):
-    """Extract probs, train ScoreNet, evaluate, save results for one fold."""
     result_path = os.path.join(fold_dir, 'scorenet_results.json')
     if os.path.exists(result_path):
         print(f"  [Fold {fold_idx}] {test_pid}: scorenet_results.json exists, skipping.")
         with open(result_path) as f:
             return json.load(f)
-
-    print(f"\n{'='*60}")
-    print(f"[Fold {fold_idx}] Test patient: {test_pid}")
-    print(f"{'='*60}")
-
-    # Load the fold's LaBraM checkpoint
-    print(f"  Loading checkpoint: {ckpt_path}")
     model = load_fold_model(ckpt_path, args, device)
 
-    # Build train and test datasets
     test_h5 = patient_h5s[test_pid]
     train_h5s = [p for pid, p in sorted(patient_h5s.items()) if pid != test_pid]
 
-    # Extract test probs
-    print(f"  Extracting test probs ({test_pid})...")
     test_ds = MultiPatientAdversarialDataset([test_h5])
     test_probs, test_labels, test_pids = extract_probs_from_dataset(
         model, test_ds, device, args.batch_size, args.num_workers)
     test_ds.close()
 
-    # Extract train probs
-    print(f"  Extracting train probs ({len(train_h5s)} patients)...")
     train_ds = MultiPatientAdversarialDataset(train_h5s)
     train_probs, train_labels, train_pids = extract_probs_from_dataset(
         model, train_ds, device, args.batch_size, args.num_workers)
     train_ds.close()
 
-    # Free LaBraM from GPU
     del model
     torch.cuda.empty_cache()
 
-    seiz_pct_train = 100 * train_labels.sum() / len(train_labels)
-    seiz_pct_test = 100 * test_labels.sum() / len(test_labels)
-    print(f"  Train: {len(train_labels)} windows ({seiz_pct_train:.2f}% seizure)")
-    print(f"  Test:  {len(test_labels)} windows ({seiz_pct_test:.2f}% seizure)")
-
-    # Build ScoreNet training data
     max_len = args.sn_max_len if args.sn_max_len > 0 else None
     train_items = build_scorenet_items(train_probs, train_labels, train_pids,
                                        args.sn_w, max_len)
-    print(f"  ScoreNet training sequences: {len(train_items)}")
-
-    # Train ScoreNet
-    print(f"  Training ScoreNet ({args.sn_epochs} epochs)...")
     sn_model, sn_best_loss = train_scorenet_fold(train_items, args, device)
-    print(f"  ScoreNet best train loss: {sn_best_loss:.4f}")
-
-    # Save ScoreNet checkpoint
     sn_ckpt_path = os.path.join(fold_dir, 'scorenet_best.pth')
     torch.save({
         'model_state_dict': sn_model.state_dict(),
@@ -440,7 +350,6 @@ def process_fold(fold_idx, test_pid, fold_dir, ckpt_path, patient_h5s, args, dev
         'train_loss': sn_best_loss,
     }, sn_ckpt_path)
 
-    # Evaluate
     results = evaluate_scorenet(
         sn_model, test_probs, test_labels, device,
         threshold=args.sn_threshold, min_dur=args.sn_min_dur)
@@ -470,10 +379,6 @@ def aggregate_results(all_results, output_dir):
         'sn_precision', 'sn_evt_f1', 'sn_evt_recall', 'sn_evt_precision',
         'sn_far_per_hr',
     ]
-
-    print(f"\n{'='*80}")
-    print("SCORENET LOPOCV RESULTS SUMMARY")
-    print(f"{'='*80}")
 
     header = (f"{'Fold':>4}  {'Patient':>7}  {'Sens':>7}  {'Spec':>7}  "
               f"{'F1':>7}  {'AUC':>7}  {'EvtF1':>7}  {'FAR/hr':>7}  {'Szrs':>5}")
@@ -527,18 +432,10 @@ def main():
         print(f"Running {len(folds)} selected folds: {sorted(selected)}")
 
     all_results = []
-    start_time = time.time()
-
     for fold_idx, test_pid, fold_dir, ckpt_path in folds:
-        if test_pid not in patient_h5s:
-            print(f"  Warning: {test_pid} not found in data_dir, skipping fold {fold_idx}")
-            continue
         results = process_fold(fold_idx, test_pid, fold_dir, ckpt_path,
                                patient_h5s, args, device)
         all_results.append(results)
-
-    elapsed = time.time() - start_time
-    print(f"\nTotal time: {datetime.timedelta(seconds=int(elapsed))}")
 
     if all_results:
         aggregate_results(all_results, args.lopocv_dir)

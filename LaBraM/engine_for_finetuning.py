@@ -1,4 +1,3 @@
-# --------------------------------------------------------
 # Large Brain Model for Learning Generic Representations with Tremendous EEG Data in BCI
 # By Wei-Bang Jiang
 # Based on BEiT-v2, timm, DeiT, and DINO code bases
@@ -6,7 +5,8 @@
 # https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # https://github.com/facebookresearch/deit/
 # https://github.com/facebookresearch/dino
-# ---------------------------------------------------------
+
+# additions in this file for MIDAS: get_grl_lambda, train_adversarial_batch, and train_one_epoch_adversarial
 import math
 import sys
 from typing import Iterable, Optional
@@ -210,12 +210,9 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
     return ret
 
 
-# ---------------------------------------------------------------------------
-#  Adversarial training helpers
-# ---------------------------------------------------------------------------
+# adversarial training helpers
 
 def get_grl_lambda(epoch, total_epochs, gamma=10.0):
-    """DANN-style ramp-up: 0 at start -> 1 at end."""
     p = epoch / max(total_epochs - 1, 1)
     return float(2.0 / (1.0 + math.exp(-gamma * p)) - 1.0)
 
@@ -262,8 +259,6 @@ def train_one_epoch_adversarial(
     metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
-
-    print(f"  GRL lambda = {grl_lambda:.4f}, adv_lambda = {adv_lambda}")
 
     if loss_scaler is None:
         model.zero_grad()
@@ -314,7 +309,6 @@ def train_one_epoch_adversarial(
         aux_loss_value = aux_loss.item()
 
         if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
         if loss_scaler is None:

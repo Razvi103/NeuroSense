@@ -1,13 +1,3 @@
-"""
-Train the ScoreNet learned postprocessor on extracted probability sequences.
-
-Usage:
-    python train_scorenet.py \
-        --data_dir ./scorenet_data \
-        --output_dir ./scorenet_checkpoints \
-        --epochs 200 --lr 1e-2
-"""
-
 import argparse
 import os
 import json
@@ -30,8 +20,6 @@ from scorenet import (
 
 
 def run_inference(model, loader, device, loss_fn):
-    """Run ScoreNet on a dataloader, return flat refined probs, targets,
-    and the mean loss."""
     model.eval()
     all_probs, all_targets = [], []
     total_loss = 0.0
@@ -57,7 +45,6 @@ def run_inference(model, loader, device, loss_fn):
 
 
 def compute_pointwise_metrics(probs, targets, threshold=0.5):
-    """Point-wise precision, recall, F1, ROC-AUC, sensitivity, specificity."""
     preds = (probs >= threshold).astype(int)
     y_true = targets.astype(int)
 
@@ -79,36 +66,25 @@ def compute_pointwise_metrics(probs, targets, threshold=0.5):
         'recall': recall,
         'f1': f1,
         'roc_auc': auc,
-        'sensitivity': recall,
         'specificity': specificity,
         'tp': int(tp), 'fp': int(fp), 'fn': int(fn), 'tn': int(tn),
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train ScoreNet postprocessor')
-    parser.add_argument('--data_dir', default='./scorenet_data', type=str,
-                        help='Directory with train.npz, val.npz from extract_probs.py')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', default='./scorenet_data', type=str)
     parser.add_argument('--output_dir', default='./scorenet_checkpoints', type=str)
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--lr', default=1e-2, type=float)
     parser.add_argument('--batch_size', default=32, type=int)
-    parser.add_argument('--w', default=6, type=int,
-                        help='Half-width of conv filter (filter_len = 2w+1)')
-    parser.add_argument('--gamma', default=0.5, type=float,
-                        help='Candidate threshold (fixed)')
-    parser.add_argument('--max_len', default=5000, type=int,
-                        help='Max sub-sequence length per chunk (prevents single-group '
-                             'collapse on long TUSZ recordings; use 0 for full patient)')
-    parser.add_argument('--loss', default='combined', type=str,
-                        choices=['log_dice', 'combined', 'bce'],
-                        help='Loss function: log_dice | combined | bce')
-    parser.add_argument('--pos_weight', default=17.0, type=float,
-                        help='Positive class weight for BCE / combined loss')
-    parser.add_argument('--alpha', default=0.3, type=float,
-                        help='Dice weight in combined loss (1-alpha for BCE)')
-    parser.add_argument('--threshold', default=0.5, type=float,
-                        help='Threshold for point-wise eval')
+    parser.add_argument('--w', default=6, type=int)
+    parser.add_argument('--gamma', default=0.5, type=float)
+    parser.add_argument('--max_len', default=5000, type=int)
+    parser.add_argument('--loss', default='combined', type=str, choices=['log_dice', 'combined', 'bce'])
+    parser.add_argument('--pos_weight', default=17.0, type=float)
+    parser.add_argument('--alpha', default=0.3, type=float)
+    parser.add_argument('--threshold', default=0.5, type=float)
     parser.add_argument('--device', default='cuda', type=str)
     args = parser.parse_args()
 
@@ -117,7 +93,6 @@ def main():
 
     max_len = args.max_len if args.max_len > 0 else None
 
-    print("Loading datasets ...")
     train_dset = ProbSequenceDataset(
         os.path.join(args.data_dir, 'train.npz'),
         w=args.w, max_len=max_len)
@@ -132,12 +107,7 @@ def main():
         val_dset, batch_size=args.batch_size, shuffle=False,
         collate_fn=collate_fn, num_workers=4, pin_memory=True)
 
-    print(f"  Train: {len(train_dset)} sequences")
-    print(f"  Val:   {len(val_dset)} sequences")
-
     model = ScoreNet(w=args.w, gamma=args.gamma).to(device)
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"ScoreNet parameters: {n_params}")
 
     if args.loss == 'log_dice':
         loss_fn = lambda yh, y: log_dice_loss(yh, y)
@@ -210,23 +180,20 @@ def main():
 
         star = ' *' if improved else ''
         print(f"Epoch {epoch:3d} | "
-              f"train {avg_train_loss:.4f} | "
-              f"val {avg_val_loss:.4f} | "
-              f"F1 {pw['f1']:.4f} | "
-              f"P {pw['precision']:.4f} | "
-              f"R {pw['recall']:.4f} | "
-              f"AUC {pw['roc_auc']:.4f} | "
-              f"Sens {pw['sensitivity']:.4f} | "
-              f"Spec {pw['specificity']:.4f}"
+              f"train {avg_train_loss} | "
+              f"val {avg_val_loss} | "
+              f"F1 {pw['f1']} | "
+              f"P {pw['precision']} | "
+              f"R {pw['recall']} | "
+              f"AUC {pw['roc_auc']} | "
+              f"Sens {pw['sensitivity']} | "
+              f"Spec {pw['specificity']}"
               f"{star}")
 
     log_path = os.path.join(args.output_dir, 'training_log.json')
     with open(log_path, 'w') as f:
         json.dump(history, f, indent=2)
-    print(f"\nBest val F1: {best_val_f1:.4f}")
-    print(f"Checkpoint: {os.path.join(args.output_dir, 'scorenet_best.pth')}")
-    print(f"Log: {log_path}")
-
+    print(f"best val F1: {best_val_f1:.4f}")
 
 if __name__ == '__main__':
     main()

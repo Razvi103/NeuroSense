@@ -8,13 +8,12 @@ import h5py
 import random
 from tqdm import tqdm
 
-DATA_ROOT = '/home/jovyan/extra-data/CHB-MIT_Raw'
-OUTPUT_DIR = '/home/jovyan/extra-data/CHBMIT'
+DATA_ROOT = os.environ.get("CHBMIT_RAW_DIR", "./data/CHB-MIT_Raw")
+OUTPUT_DIR = os.environ.get("CHBMIT_OUT_DIR", "./data/CHBMIT")
 WINDOW_SIZE = 2
 STRIDE = 1
 TARGET_FREQ = 200
 
-# Standard 23 channels
 Standard_Channels = [
     'FP1-F7', 'F7-T7', 'T7-P7', 'P7-O1', 'FP1-F3', 'F3-C3', 'C3-P3', 'P3-O1',
     'FP2-F4', 'F4-C4', 'C4-P4', 'P4-O2', 'FP2-F8', 'F8-T8', 'T8-P8', 'P8-O2',
@@ -46,7 +45,6 @@ def parse_summary_file(summary_path):
     return file_info
 
 def get_channel_mapping(raw_channels, target_channels):
-    """Maps target channels to raw channels, handling duplicates."""
     raw_upper = [c.upper().strip() for c in raw_channels]
     mapping = []
     missing = []
@@ -80,12 +78,8 @@ def get_channel_mapping(raw_channels, target_channels):
     return mapping, missing
 
 def process_file(edf_path, seizure_intervals, writer_dict, patient_int_id):
-    try:
-        with mne.utils.use_log_level('ERROR'): 
-            raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
-    except Exception as e:
-        print(f"Failed to read {os.path.basename(edf_path)}: {e}")
-        return 0
+
+    raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
 
     mapping, missing = get_channel_mapping(raw.ch_names, Standard_Channels)
     if len(missing) > 0:
@@ -94,15 +88,12 @@ def process_file(edf_path, seizure_intervals, writer_dict, patient_int_id):
     raw.pick(mapping)
     raw.reorder_channels([raw.ch_names[i] for i in range(len(mapping))])
 
-    try:
-        raw.notch_filter(60.0, verbose=False)
-        raw.filter(0.1, 75.0, verbose=False)
-        if raw.info['sfreq'] != TARGET_FREQ:
-            raw.resample(TARGET_FREQ, verbose=False)
-        data = raw.get_data() * 1e6
-    except Exception as e:
-        print(f"Processing error in {os.path.basename(edf_path)}: {e}")
-        return 0
+    raw.notch_filter(60.0, verbose=False)
+    raw.filter(0.1, 75.0, verbose=False)
+    if raw.info['sfreq'] != TARGET_FREQ:
+        raw.resample(TARGET_FREQ, verbose=False)
+    data = raw.get_data() * 1e6
+
 
     n_samples = data.shape[1]
     window_pts = int(WINDOW_SIZE * TARGET_FREQ)
@@ -149,7 +140,6 @@ def main():
     patient_dirs = sorted(glob.glob(os.path.join(DATA_ROOT, 'chb*')))
     patient_map = {}
     
-    print("Scanning and grouping by Patient...")
     for p_dir in patient_dirs:
         if not os.path.isdir(p_dir): continue
         pid = os.path.basename(p_dir)
@@ -168,7 +158,7 @@ def main():
 
     all_patients = list(patient_map.keys())
     patient_to_int = {pid: i for i, pid in enumerate(sorted(all_patients))}
-    print(f"Total unique patients: {len(patient_to_int)}")
+    print(f"number patients: {len(patient_to_int)}")
     
     n_patients = len(all_patients)
     n_train = int(n_patients * 0.8)
@@ -177,9 +167,7 @@ def main():
     train_pids = all_patients[:n_train]
     val_pids = all_patients[n_train:n_train+n_val]
     test_pids = all_patients[n_train+n_val:]
-    
-    print(f"Patients -> Train: {len(train_pids)} | Val: {len(val_pids)} | Test: {len(test_pids)}")
-    
+        
     splits = {
         'train': [(pid, edf, intervals) for pid in train_pids for edf, intervals in patient_map[pid]],
         'val':   [(pid, edf, intervals) for pid in val_pids   for edf, intervals in patient_map[pid]],
@@ -189,7 +177,6 @@ def main():
     window_pts = int(WINDOW_SIZE * TARGET_FREQ)
 
     for split_name, files in splits.items():
-        print(f"\nProcessing {split_name} set ({len(files)} files)...")
         h5_path = os.path.join(OUTPUT_DIR, f'{split_name}.h5')
         total_segments = 0
         
@@ -214,15 +201,9 @@ def main():
                 total_segments += n
 
             total_seizure = int(np.sum(f['labels'][:]))
-            unique_patients = len(set(f['patient_ids'][:].tolist()))
 
-        print(f"  Total segments: {total_segments}")
-        print(f"  Seizure segments: {total_seizure}  "
-              f"({100*total_seizure/max(total_segments,1):.2f}%)")
-        print(f"  Unique patients: {unique_patients}")
-        print(f"  Saved to {h5_path}")
-
-    print("\nDone.")
+        print(f"total segments: {total_segments}")
+        print(f"total seizure segments: {total_seizure} ({100*total_seizure/total_segments}%)")
 
 if __name__ == '__main__':
     main()

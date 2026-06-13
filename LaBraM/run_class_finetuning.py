@@ -1,8 +1,8 @@
-# --------------------------------------------------------
+
 # Large Brain Model for Learning Generic Representations with Tremendous EEG Data in BCI
 # By Wei-Bang Jiang
 # Based on BEiT-v2, timm, DeiT, and DINO code bases
-# ---------------------------------------------------------
+# added for MIDAS: CHB-MIT and TUSZ dataset support, AdversarialNeuralTransformer model wrapping
 
 import argparse
 import datetime
@@ -31,19 +31,14 @@ import modeling_finetune
 from modeling_finetune import AdversarialNeuralTransformer
 
 def get_args():
-    parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
+    parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=30, type=int)
     parser.add_argument('--update_freq', default=1, type=int)
     parser.add_argument('--save_ckpt_freq', default=5, type=int)
 
-    # robust evaluation
-    parser.add_argument('--robust_test', default=None, type=str,
-                        help='robust evaluation dataset')
-    
     # Model parameters
-    parser.add_argument('--model', default='labram_base_patch200_200', type=str, metavar='MODEL',
-                        help='Name of model to train')
+    parser.add_argument('--model', default='labram_base_patch200_200', type=str)
     parser.add_argument('--qkv_bias', action='store_true')
     parser.add_argument('--disable_qkv_bias', action='store_false', dest='qkv_bias')
     parser.set_defaults(qkv_bias=True)
@@ -52,18 +47,13 @@ def get_args():
     parser.set_defaults(rel_pos_bias=True)
     parser.add_argument('--abs_pos_emb', action='store_true')
     parser.set_defaults(abs_pos_emb=False)
-    parser.add_argument('--layer_scale_init_value', default=0.1, type=float, 
-                        help="0.1 for base, 1e-5 for large. set 0 to disable layer scale")
+    parser.add_argument('--layer_scale_init_value', default=0.1, type=float)
 
-    parser.add_argument('--input_size', default=200, type=int,
-                        help='EEG input size')
+    parser.add_argument('--input_size', default=200, type=int)
 
-    parser.add_argument('--drop', type=float, default=0.0, metavar='PCT',
-                        help='Dropout rate (default: 0.)')
-    parser.add_argument('--attn_drop_rate', type=float, default=0.0, metavar='PCT',
-                        help='Attention dropout rate (default: 0.)')
-    parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
-                        help='Drop path rate (default: 0.1)')
+    parser.add_argument('--drop', type=float, default=0.0)
+    parser.add_argument('--attn_drop_rate', type=float, default=0.0)
+    parser.add_argument('--drop_path', type=float, default=0.1)
 
     parser.add_argument('--disable_eval_during_finetuning', action='store_true', default=False)
 
@@ -160,35 +150,25 @@ def get_args():
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
     
-    parser.add_argument('--data_path', default='/datasets/CHBMIT', type=str,
+    parser.add_argument('--data_path', default='./data/CHBMIT', type=str,
                     help='path to dataset root')
 
     # distributed training parameters
-    parser.add_argument('--world_size', default=1, type=int,
-                        help='number of distributed processes')
+    parser.add_argument('--world_size', default=1, type=int)
     parser.add_argument('--local_rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
-    parser.add_argument('--dist_url', default='env://',
-                        help='url used to set up distributed training')
+    parser.add_argument('--dist_url', default='env://')
 
     parser.add_argument('--enable_deepspeed', action='store_true', default=False)
-    parser.add_argument('--dataset', default='TUAB', type=str,
-                        help='dataset: TUAB | TUEV | CHBMIT | TUSZ')
-    parser.add_argument('--pos_weight', default=200.0, type=float,
-                        help='pos_weight for BCEWithLogitsLoss (used by CHBMIT / TUSZ)')
+    parser.add_argument('--dataset', default='TUAB', type=str)
+    parser.add_argument('--pos_weight', default=200.0, type=float)
 
     # Adversarial training parameters
-    parser.add_argument('--adversarial', action='store_true', default=False,
-                        help='Enable adversarial patient-invariant training')
-    parser.add_argument('--adv_lambda', default=0.1, type=float,
-                        help='Weight for the patient adversarial loss')
-    parser.add_argument('--adv_gamma', default=10.0, type=float,
-                        help='GRL lambda ramp-up steepness (DANN schedule)')
-    parser.add_argument('--adv_hidden_dim', default=256, type=int,
-                        help='Hidden dimension of the patient discriminator MLP')
-    parser.add_argument('--intermediate_layers', default='', type=str,
-                        help='Comma-separated backbone block indices for multi-layer '
-                             'adversarial heads (e.g. "3,7"). Empty = disabled.')
+    parser.add_argument('--adversarial', action='store_true', default=False)
+    parser.add_argument('--adv_lambda', default=0.1, type=float)
+    parser.add_argument('--adv_gamma', default=10.0, type=float)
+    parser.add_argument('--adv_hidden_dim', default=256, type=int)
+    parser.add_argument('--intermediate_layers', default='', type=str)
 
     known_args, _ = parser.parse_known_args()
 
@@ -429,7 +409,7 @@ def main(args, ds_init):
                     pass
             checkpoint_model = new_dict
 
-        # When using adversarial wrapper, load pre-trained weights into the backbone
+        # when using adversarial wrapper, load pre-trained weights into the backbone
         load_target = model.backbone if getattr(args, 'adversarial', False) else model
         state_dict = load_target.state_dict()
         for k in ['head.weight', 'head.bias']:

@@ -1,32 +1,3 @@
-"""
-Leave-One-Patient-Out Cross-Validation (LOPOCV) for CHB-MIT.
-
-Implements the standard 24-fold LOPOCV protocol used in the CHB-MIT seizure
-detection literature:
-  - Each fold holds out 1 patient for testing, trains on the remaining 23
-  - Supports both adversarial (GRL + channel attention) and pure baseline mode
-  - Fixed training schedule (no per-fold hyperparameter tuning)
-  - Reports per-fold and mean +/- std metrics
-
-Usage:
-    # Adversarial (default):
-    python run_lopocv_chbmit.py \
-        --data_dir /path/to/CHBMIT_per_patient \
-        --finetune /path/to/labram_pretrained.pth \
-        --output_dir /path/to/lopocv_results \
-        --epochs 20 --lr 3e-6 --batch_size 1024
-
-    # Pure baseline (no channel attention, no GRL):
-    python run_lopocv_chbmit.py --no_adversarial \
-        --data_dir /path/to/CHBMIT_per_patient \
-        --finetune /path/to/labram_pretrained.pth \
-        --output_dir /path/to/lopocv_results_baseline \
-        --epochs 20 --lr 3e-6 --batch_size 1024
-
-    # Run specific folds (for multi-GPU parallelism):
-    python run_lopocv_chbmit.py ... --folds 0,1,2,3,4,5
-"""
-
 import argparse
 import copy
 import datetime
@@ -69,24 +40,18 @@ CHBMIT_CH_NAMES = [
 
 
 def get_args():
-    p = argparse.ArgumentParser('CHB-MIT LOPOCV with adversarial training')
+    p = argparse.ArgumentParser()
 
-    # Data
-    p.add_argument('--data_dir', required=True, type=str,
-                   help='Directory containing per-patient H5 files (chb01.h5, ...)')
-    p.add_argument('--output_dir', required=True, type=str,
-                   help='Root directory for per-fold outputs and aggregated results')
-    p.add_argument('--folds', default='', type=str,
-                   help='Comma-separated fold indices to run (default: all)')
+    p.add_argument('--data_dir', required=True, type=str)
+    p.add_argument('--output_dir', required=True, type=str)
+    p.add_argument('--folds', default='', type=str)
 
-    # Model
     p.add_argument('--model', default='labram_base_patch200_200', type=str)
-    p.add_argument('--finetune', default='', type=str,
-                   help='Path to pretrained LaBraM checkpoint')
+    p.add_argument('--finetune', default='', type=str)
     p.add_argument('--input_size', default=200, type=int)
 
-    # Training (defaults match proven CHB-MIT adversarial config)
-    p.add_argument('--epochs', default=20, type=int)
+    # training 
+    p.add_argument('--epochs', default=10, type=int)
     p.add_argument('--batch_size', default=1024, type=int)
     p.add_argument('--lr', default=3e-6, type=float)
     p.add_argument('--min_lr', default=1e-6, type=float)
@@ -104,7 +69,7 @@ def get_args():
     p.add_argument('--pos_weight', default=10.0, type=float,
                    help='pos_weight for BCEWithLogitsLoss')
 
-    # Model details (defaults match proven CHB-MIT config)
+    # model details
     p.add_argument('--drop', default=0.0, type=float)
     p.add_argument('--attn_drop_rate', default=0.0, type=float)
     p.add_argument('--qkv_bias', action='store_true')
@@ -120,27 +85,21 @@ def get_args():
     p.set_defaults(use_mean_pooling=True)
     p.add_argument('--init_scale', default=0.001, type=float)
 
-    # Baseline vs adversarial
-    p.add_argument('--no_adversarial', action='store_true', default=False,
-                   help='Run pure baseline (plain NeuralTransformer, no channel '
-                        'attention, no GRL). Overrides all adversarial settings.')
+    # baseline
+    p.add_argument('--no_adversarial', action='store_true', default=False)
 
-    # Adversarial (defaults match proven CHB-MIT config; ignored with --no_adversarial)
+    # adversarial 
     p.add_argument('--adv_lambda', default=0.01, type=float)
     p.add_argument('--adv_gamma', default=5.0, type=float)
     p.add_argument('--adv_hidden_dim', default=512, type=int)
-    p.add_argument('--intermediate_layers', default='', type=str,
-                   help='Comma-separated backbone block indices for multi-layer adversarial heads')
-
-    # Misc
+    p.add_argument('--intermediate_layers', default='', type=str)
+    # utils
     p.add_argument('--device', default='cuda', type=str)
     p.add_argument('--seed', default=42, type=int)
     p.add_argument('--num_workers', default=8, type=int)
     p.add_argument('--pin_mem', action='store_true')
     p.set_defaults(pin_mem=True)
     p.add_argument('--save_ckpt_freq', default=1, type=int)
-
-    # Checkpoint loading keys
     p.add_argument('--model_key', default='model|module', type=str)
     p.add_argument('--model_prefix', default='', type=str)
     p.add_argument('--model_filter_name', default='gzp', type=str)
@@ -149,7 +108,6 @@ def get_args():
 
 
 def discover_patients(data_dir):
-    """Find all per-patient H5 files, return sorted list of (patient_id, h5_path)."""
     h5_files = sorted(glob.glob(os.path.join(data_dir, 'chb*.h5')))
     patients = []
     for path in h5_files:
@@ -159,7 +117,6 @@ def discover_patients(data_dir):
 
 
 def load_pretrained_state_dict(args):
-    """Load and clean the pretrained checkpoint state dict once."""
     if not args.finetune:
         return None
     checkpoint = torch.load(args.finetune, map_location='cpu', weights_only=False)
@@ -188,11 +145,6 @@ def load_pretrained_state_dict(args):
 
 
 def build_model(args, num_patients, pretrained_state, device):
-    """Create a model and load pretrained weights.
-
-    With --no_adversarial: returns the plain NeuralTransformer backbone.
-    Otherwise: wraps it in AdversarialNeuralTransformer.
-    """
     backbone = create_model(
         args.model,
         pretrained=False,
@@ -232,8 +184,6 @@ def build_model(args, num_patients, pretrained_state, device):
 
 
 class _DropPatientID(torch.utils.data.Dataset):
-    """Wraps MultiPatientAdversarialDataset, dropping the patient_id column
-    so the dataloader yields (data, label) for the non-adversarial train loop."""
 
     def __init__(self, dataset):
         self._ds = dataset
@@ -249,55 +199,8 @@ class _DropPatientID(torch.utils.data.Dataset):
         self._ds.close()
 
 
-def get_events(binary_arr):
-    if len(binary_arr) == 0:
-        return []
-    padded = np.concatenate(([0], binary_arr, [0]))
-    diffs = np.diff(padded)
-    starts = np.where(diffs == 1)[0]
-    ends = np.where(diffs == -1)[0]
-    return list(zip(starts, ends))
-
-
-def compute_event_metrics(y_true, y_pred, stride_sec=1.0):
-    true_events = get_events(y_true)
-    pred_events = get_events(y_pred)
-
-    tp_events = 0
-    for t_s, t_e in true_events:
-        for p_s, p_e in pred_events:
-            if max(t_s, p_s) < min(t_e, p_e):
-                tp_events += 1
-                break
-
-    fp_events = 0
-    for p_s, p_e in pred_events:
-        is_tp = False
-        for t_s, t_e in true_events:
-            if max(t_s, p_s) < min(t_e, p_e):
-                is_tp = True
-                break
-        if not is_tp:
-            fp_events += 1
-
-    fn_events = len(true_events) - tp_events
-    recall = tp_events / len(true_events) if true_events else 0.0
-    precision = tp_events / (tp_events + fp_events) if (tp_events + fp_events) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    total_hours = len(y_true) * stride_sec / 3600.0
-    far = fp_events / total_hours if total_hours > 0 else 0.0
-
-    return {
-        'n_seizures': len(true_events),
-        'tp': tp_events, 'fn': fn_events, 'fp': fp_events,
-        'evt_recall': recall, 'evt_precision': precision, 'evt_f1': f1,
-        'far_per_hr': far,
-    }
-
-
 @torch.no_grad()
 def evaluate_fold(model, data_loader, device, ch_names, threshold=0.5):
-    """Run inference on the held-out patient, return comprehensive metrics."""
     input_chans = utils.get_input_chans(ch_names)
     model.eval()
     all_probs = []
@@ -337,34 +240,25 @@ def evaluate_fold(model, data_loader, device, ch_names, threshold=0.5):
     results['n_samples'] = int(len(y_true))
     results['n_seizure_samples'] = int(y_true.sum())
 
-    evt = compute_event_metrics(y_true, y_pred)
-    results.update(evt)
-
     szcore_evt = compute_szcore_event_metrics(y_true, y_pred)
     results['szcore_evt_f1'] = szcore_evt['F1']
     results['szcore_evt_recall'] = szcore_evt['Sensitivity']
     results['szcore_evt_precision'] = szcore_evt['Precision']
     results['szcore_far_per_hr'] = szcore_evt['FAR/hr']
     results['szcore_far_per_day'] = szcore_evt['FAR/day']
+    results['n_seizures'] = szcore_evt['Total Seizures (ref)']
 
     return results
 
 
 def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state, device):
-    """Train and evaluate a single LOPOCV fold."""
     fold_dir = os.path.join(args.output_dir, f'fold_{fold_idx:02d}_{test_pid}')
     os.makedirs(fold_dir, exist_ok=True)
 
     result_path = os.path.join(fold_dir, 'results.json')
     if os.path.exists(result_path):
-        print(f"\n[Fold {fold_idx}] {test_pid}: results already exist, skipping.")
         with open(result_path) as f:
             return json.load(f)
-
-    print(f"\n{'='*60}")
-    print(f"[Fold {fold_idx}] Test patient: {test_pid}")
-    print(f"  Training on {len(train_paths)} patient files")
-    print(f"{'='*60}")
 
     raw_train_dataset = MultiPatientAdversarialDataset(train_paths)
     raw_test_dataset = MultiPatientAdversarialDataset([test_path])
@@ -376,10 +270,6 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
     else:
         train_dataset = raw_train_dataset
         test_dataset = raw_test_dataset
-
-    print(f"  Train samples: {len(train_dataset)}, Test samples: {len(test_dataset)}")
-    if not args.no_adversarial:
-        print(f"  Num patients (discriminator classes): {num_patients}")
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -479,65 +369,13 @@ def run_fold(fold_idx, test_pid, test_path, train_paths, args, pretrained_state,
           f"Spec={results['specificity']:.4f}  "
           f"F1={results['f1']:.4f}  "
           f"AUC={results['roc_auc']:.4f}  "
-          f"EvtF1={results['evt_f1']:.4f}  "
           f"ScEvF1={results['szcore_evt_f1']:.4f}  "
-          f"FAR={results['far_per_hr']:.2f}/hr")
+          f"FAR={results['szcore_far_per_hr']:.2f}/hr")
 
     raw_train_dataset.close()
     raw_test_dataset.close()
 
     return results
-
-
-def aggregate_results(all_results, output_dir):
-    """Print and save a summary table with mean +/- std."""
-    metrics_keys = [
-        'sensitivity', 'specificity', 'f1', 'roc_auc', 'auprc',
-        'precision', 'evt_f1', 'evt_recall', 'evt_precision', 'far_per_hr',
-        'szcore_evt_f1', 'szcore_evt_recall', 'szcore_evt_precision',
-        'szcore_far_per_hr', 'szcore_far_per_day',
-    ]
-
-    print(f"\n{'='*80}")
-    print("LOPOCV RESULTS SUMMARY")
-    print(f"{'='*80}")
-
-    header = (f"{'Fold':>4}  {'Patient':>7}  {'Sens':>7}  {'Spec':>7}  "
-              f"{'F1':>7}  {'AUC':>7}  {'EvtF1':>7}  {'ScEvF1':>7}  "
-              f"{'FAR/hr':>7}  {'Szrs':>5}")
-    print(header)
-    print('-' * len(header))
-
-    for r in all_results:
-        print(f"{r['fold']:4d}  {r['test_patient']:>7}  "
-              f"{r['sensitivity']:7.4f}  {r['specificity']:7.4f}  "
-              f"{r['f1']:7.4f}  {r['roc_auc']:7.4f}  "
-              f"{r['evt_f1']:7.4f}  {r.get('szcore_evt_f1', float('nan')):7.4f}  "
-              f"{r['far_per_hr']:7.2f}  "
-              f"{r['n_seizures']:5d}")
-
-    print('-' * len(header))
-
-    summary = {}
-    for key in metrics_keys:
-        values = [r[key] for r in all_results
-                  if key in r and not (isinstance(r[key], float) and math.isnan(r[key]))]
-        if values:
-            summary[key] = {
-                'mean': float(np.mean(values)),
-                'std': float(np.std(values)),
-                'min': float(np.min(values)),
-                'max': float(np.max(values)),
-            }
-            print(f"  {key:>16}: {summary[key]['mean']:.4f} +/- {summary[key]['std']:.4f}  "
-                  f"[{summary[key]['min']:.4f}, {summary[key]['max']:.4f}]")
-
-    summary_path = os.path.join(output_dir, 'lopocv_summary.json')
-    with open(summary_path, 'w') as f:
-        json.dump({'per_fold': all_results, 'summary': summary}, f, indent=2)
-    print(f"\nFull results saved to {summary_path}")
-
-    return summary
 
 
 def main():
@@ -559,16 +397,10 @@ def main():
         fold_indices = list(range(n_patients))
 
     pretrained_state = load_pretrained_state_dict(args)
-    if pretrained_state is not None:
-        print(f"Loaded pretrained checkpoint from {args.finetune}")
-
     all_results = []
     start_time = time.time()
 
     for fold_idx in fold_indices:
-        if fold_idx >= n_patients:
-            print(f"Warning: fold {fold_idx} >= {n_patients} patients, skipping.")
-            continue
 
         test_pid, test_path = patients[fold_idx]
         train_paths = [p for i, (_, p) in enumerate(patients) if i != fold_idx]
@@ -576,13 +408,5 @@ def main():
         results = run_fold(fold_idx, test_pid, test_path, train_paths,
                            args, pretrained_state, device)
         all_results.append(results)
-
-    elapsed = time.time() - start_time
-    print(f"\nTotal time: {datetime.timedelta(seconds=int(elapsed))}")
-
-    if all_results:
-        aggregate_results(all_results, args.output_dir)
-
-
 if __name__ == '__main__':
     main()

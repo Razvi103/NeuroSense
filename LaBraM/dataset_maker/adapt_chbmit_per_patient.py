@@ -1,19 +1,3 @@
-"""
-Generate one HDF5 file per CHB-MIT patient for LOPOCV.
-
-Reuses the same preprocessing pipeline as adapt_chbmit.py (channel mapping,
-notch/bandpass filtering, resampling, 2-second windows with 1-second stride)
-but writes each patient to its own file: output_dir/chb01.h5, chb02.h5, ...
-
-Also writes patient_map.json with the global patient-to-int mapping and
-per-patient metadata.
-
-Usage:
-    python dataset_maker/adapt_chbmit_per_patient.py \
-        --data_root /path/to/CHB-MIT_Raw \
-        --output_dir /path/to/CHBMIT_per_patient
-"""
-
 import os
 import argparse
 import glob
@@ -50,13 +34,11 @@ def parse_summary_file(summary_path):
         intervals = []
         for i, line in enumerate(lines):
             if "Start Time" in line and "Seizure" in line:
-                try:
-                    start_sec = int(re.search(r'(\d+)\s*seconds', line).group(1))
-                    end_line = lines[i + 1]
-                    end_sec = int(re.search(r'(\d+)\s*seconds', end_line).group(1))
-                    intervals.append((start_sec, end_sec))
-                except Exception:
-                    pass
+                start_sec = int(re.search(r'(\d+)\s*seconds', line).group(1))
+                end_line = lines[i + 1]
+                end_sec = int(re.search(r'(\d+)\s*seconds', end_line).group(1))
+                intervals.append((start_sec, end_sec))
+
         file_info[filename] = intervals
     return file_info
 
@@ -92,12 +74,9 @@ def get_channel_mapping(raw_channels, target_channels):
 
 
 def process_file(edf_path, seizure_intervals, writer_dict, patient_int_id):
-    try:
-        with mne.utils.use_log_level('ERROR'):
-            raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
-    except Exception as e:
-        print(f"  Failed to read {os.path.basename(edf_path)}: {e}")
-        return 0
+    with mne.utils.use_log_level('ERROR'):
+        raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
+
 
     mapping, missing = get_channel_mapping(raw.ch_names, Standard_Channels)
     if len(missing) > 0:
@@ -106,15 +85,11 @@ def process_file(edf_path, seizure_intervals, writer_dict, patient_int_id):
     raw.pick(mapping)
     raw.reorder_channels([raw.ch_names[i] for i in range(len(mapping))])
 
-    try:
-        raw.notch_filter(60.0, verbose=False)
-        raw.filter(0.1, 75.0, verbose=False)
-        if raw.info['sfreq'] != TARGET_FREQ:
-            raw.resample(TARGET_FREQ, verbose=False)
-        data = raw.get_data() * 1e6
-    except Exception as e:
-        print(f"  Processing error in {os.path.basename(edf_path)}: {e}")
-        return 0
+    raw.notch_filter(60.0, verbose=False)
+    raw.filter(0.1, 75.0, verbose=False)
+    if raw.info['sfreq'] != TARGET_FREQ:
+        raw.resample(TARGET_FREQ, verbose=False)
+    data = raw.get_data() * 1e6
 
     n_samples = data.shape[1]
     window_pts = int(WINDOW_SIZE * TARGET_FREQ)
@@ -154,13 +129,9 @@ def process_file(edf_path, seizure_intervals, writer_dict, patient_int_id):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate per-patient H5 files for CHB-MIT LOPOCV')
-    parser.add_argument('--data_root', type=str,
-                        default='/home/jovyan/extra-data/CHB-MIT_Raw/physionet.org/files/chbmit/1.0.0',
-                        help='Root directory containing chbXX folders')
-    parser.add_argument('--output_dir', type=str,
-                        default='/home/jovyan/extra-data/CHBMIT_per_patient',
-                        help='Output directory for per-patient H5 files')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_root', type=str, default='./data/CHB-MIT_Raw')
+    parser.add_argument('--output_dir', type=str, default='./data/CHBMIT_per_patient')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -168,7 +139,6 @@ def main():
     patient_dirs = sorted(glob.glob(os.path.join(args.data_root, 'chb*')))
     patient_map = {}
 
-    print("Scanning and grouping by patient...")
     for p_dir in patient_dirs:
         if not os.path.isdir(p_dir):
             continue
@@ -187,7 +157,7 @@ def main():
 
     all_patients = sorted(patient_map.keys())
     patient_to_int = {pid: i for i, pid in enumerate(all_patients)}
-    print(f"Total unique patients: {len(all_patients)}")
+    print(f"total patients: {len(all_patients)}")
 
     window_pts = int(WINDOW_SIZE * TARGET_FREQ)
     meta = {"patient_to_int": patient_to_int, "patients": {}}
@@ -196,7 +166,6 @@ def main():
         int_id = patient_to_int[pid]
         edf_list = patient_map[pid]
         h5_path = os.path.join(args.output_dir, f'{pid}.h5')
-        print(f"\nProcessing {pid} ({len(edf_list)} files) -> {h5_path}")
 
         total_segments = 0
         with h5py.File(h5_path, 'w') as f:
@@ -223,7 +192,6 @@ def main():
             total_seizure = int(np.sum(f['labels'][:])) if total_segments > 0 else 0
 
         seizure_pct = 100 * total_seizure / max(total_segments, 1)
-        print(f"  Segments: {total_segments}  |  Seizure: {total_seizure} ({seizure_pct:.2f}%)")
 
         meta["patients"][pid] = {
             "int_id": int_id,
@@ -236,8 +204,6 @@ def main():
     meta_path = os.path.join(args.output_dir, 'patient_map.json')
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
-    print(f"\nSaved patient_map.json to {meta_path}")
-    print("Done.")
 
 
 if __name__ == '__main__':

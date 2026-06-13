@@ -6,9 +6,6 @@ import h5py
 from torch.utils.data import Dataset, DataLoader
 from einops import rearrange
 from sklearn.metrics import (
-    accuracy_score, 
-    precision_score, 
-    recall_score, 
     f1_score, 
     roc_auc_score, 
     average_precision_score, 
@@ -17,13 +14,11 @@ from sklearn.metrics import (
 from tqdm import tqdm
 import utils
 from timm.models import create_model
-import modeling_finetune
 from modeling_finetune import AdversarialNeuralTransformer
 from scorenet import ScoreNet, hard_constraints, build_toeplitz
 from timescoring.annotations import Annotation
 from timescoring.scoring import EventScoring
 
-# --- 1. Dataset Class ---
 class CHBMITDataset(Dataset):
     def __init__(self, h5_path):
         self.h5_path = h5_path
@@ -41,7 +36,6 @@ class CHBMITDataset(Dataset):
         return data, label
 
 def get_events(binary_arr):
-    """Finds start and end indices of contiguous '1' blocks."""
     events = []
     if len(binary_arr) == 0:
         return events
@@ -55,14 +49,13 @@ def get_events(binary_arr):
         events.append((s, e))
     return events
 
+#rule based post-processing
 def post_process_probs(probs, t_high, t_low, smooth_window, min_duration):
-    """Applies temporal smoothing, dual-thresholding, and duration filtering."""
     if smooth_window > 1:
         probs_smooth = pd.Series(probs).rolling(window=smooth_window, center=True).mean().fillna(0).values
     else:
         probs_smooth = probs
 
-    # Dual Thresholding
     preds = np.zeros_like(probs_smooth, dtype=int)
     in_seizure = False
     
@@ -86,58 +79,6 @@ def post_process_probs(probs, t_high, t_low, smooth_window, min_duration):
 
     return final_preds
 
-def compute_event_metrics(y_true, y_pred, stride_sec=1.0):
-    """Computes event-level metrics (original any-overlap, no tolerances)."""
-    true_events = get_events(y_true)
-    pred_events = get_events(y_pred)
-    
-    tp_events = 0
-    fp_events = 0
-    fn_events = 0
-    
-    for t_start, t_end in true_events:
-        detected = False
-        for p_start, p_end in pred_events:
-            if max(t_start, p_start) < min(t_end, p_end):
-                detected = True
-                break
-        if detected:
-            tp_events += 1
-        else:
-            fn_events += 1
-    
-    for p_start, p_end in pred_events:
-        is_true = False
-        for t_start, t_end in true_events:
-            if max(t_start, p_start) < min(t_end, p_end):
-                is_true = True
-                break
-        if not is_true:
-            fp_events += 1
-
-    recall = tp_events / len(true_events) if len(true_events) > 0 else 0.0
-    precision = tp_events / (tp_events + fp_events) if (tp_events + fp_events) > 0 else 0.0
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-    
-    total_hours = len(y_true) * stride_sec / 3600.0
-    far_per_hour = fp_events / total_hours if total_hours > 0 else 0.0
-
-    return {
-        "Total Seizures": len(true_events),
-        "TP": tp_events,
-        "FN": fn_events,
-        "FP": fp_events,
-        "Recall": recall,
-        "Precision": precision,
-        "F1": f1,
-        "FAR/hr": far_per_hour
-    }
-
-
-# ---------------------------------------------------------------------------
-# SzCORE-compliant event-based scoring (delegates to official timescoring lib)
-# ---------------------------------------------------------------------------
-
 def compute_szcore_event_metrics(
     y_true,
     y_pred,
@@ -147,7 +88,7 @@ def compute_szcore_event_metrics(
     merge_gap_sec=90.0,
     max_event_sec=300.0,
 ):
-    """SzCORE-compliant event-based metrics via the official ``timescoring`` library."""
+
     fs = 1.0 / stride_sec
     params = EventScoring.Parameters(
         toleranceStart=pre_ictal_sec,
@@ -172,6 +113,28 @@ def compute_szcore_event_metrics(
         "FAR/day": scores.fpRate,
     }
 
+def load_scorenet(ckpt_path, device):
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    saved_args = ckpt.get('args', {})
+    net = ScoreNet(
+        w=saved_args.get('w', 6),
+        gamma=saved_args.get('gamma', 0.5),
+    ).to(device).eval()
+    net.load_state_dict(ckpt['model_state_dict'])
+    return net
+
+
+@torch.no_grad()
+def scorenet_postprocess(y_prob, scorenet_model, device, threshold=0.5, min_dur_sec=10):
+    w = scorenet_model.w
+    Z = build_toeplitz(y_prob.astype(np.float32), w)
+    Z_t = torch.from_numpy(Z).to(device)
+    refined = scorenet_model(Z_t, [len(y_prob)]).cpu().numpy()
+    preds = (refined >= threshold).astype(int)
+    preds = hard_constraints(preds, min_dur_sec=min_dur_sec)
+    return preds, refined
+
+
 CHBMIT_CH_NAMES = [
     'F7', 'T3', 'T5', 'O1', 'F3', 'C3', 'C3', 'O1',
     'F4', 'C4', 'C4', 'O2', 'F8', 'T4', 'T6', 'O2',
@@ -190,13 +153,6 @@ def get_ch_names_for_dataset(dataset):
 
 
 def load_model(args, device=None):
-    """Load a baseline or adversarial model from a checkpoint.
-
-    When ``--adversarial`` is set the backbone is wrapped in
-    :class:`AdversarialNeuralTransformer` and ``num_patients`` is
-    auto-detected from the checkpoint so the caller never needs to
-    specify it.
-    """
     if device is None:
         device = torch.device(getattr(args, 'device', 'cuda'))
 
@@ -219,17 +175,6 @@ def load_model(args, device=None):
             backbone, num_patients=num_patients, adv_hidden_dim=adv_hidden,
         )
 
-        if 'seizure_head.0.weight' in clean_state:
-            model.seizure_head = torch.nn.Sequential(
-                torch.nn.Linear(backbone.embed_dim, backbone.embed_dim),
-                torch.nn.GELU(),
-                torch.nn.Dropout(0.2),
-                torch.nn.Linear(backbone.embed_dim, backbone.num_classes),
-            )
-            print("Detected 2-layer MLP seizure head checkpoint")
-        else:
-            print("Detected single-layer seizure head checkpoint")
-
         model.load_state_dict(clean_state, strict=False)
         print(f"Loaded adversarial model ({num_patients} patients)")
     else:
@@ -240,53 +185,16 @@ def load_model(args, device=None):
     return model
 
 
-def load_scorenet(ckpt_path, device):
-    """Load a trained ScoreNet checkpoint."""
-    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-    saved_args = ckpt.get('args', {})
-    net = ScoreNet(
-        w=saved_args.get('w', 6),
-        gamma=saved_args.get('gamma', 0.5),
-    )
-    net.load_state_dict(ckpt['model_state_dict'])
-    net.to(device).eval()
-    val_f1 = ckpt.get('val_f1', '?')
-    f1_str = f"{val_f1:.4f}" if isinstance(val_f1, float) else str(val_f1)
-    print(f"Loaded ScoreNet from {ckpt_path} "
-          f"(epoch {ckpt.get('epoch', '?')}, val_F1={f1_str})")
-    return net
-
-
-@torch.no_grad()
-def scorenet_postprocess(y_prob, scorenet_model, device, threshold=0.5, min_dur_sec=10):
-    """Run ScoreNet on a flat probability array and apply hard constraints."""
-    w = scorenet_model.w
-    Z = build_toeplitz(y_prob.astype(np.float32), w)
-    Z_t = torch.from_numpy(Z).to(device)
-    refined = scorenet_model(Z_t, [len(y_prob)]).cpu().numpy()
-    preds = (refined >= threshold).astype(int)
-    preds = hard_constraints(preds, min_dur_sec=min_dur_sec)
-    return preds, refined
-
-
 @torch.no_grad()
 def run_eval(args):
     device = torch.device(args.device)
     
-    print(f"Loading Model: {args.model}")
     model = load_model(args, device)
 
     ch_names_raw = get_ch_names_for_dataset(args.dataset)
     input_chans = utils.get_input_chans(ch_names_raw)
 
-    print("Loading Datasets...")
-    try:
-        test_dset = CHBMITDataset(args.data_path + '/test.h5')
-    except Exception as e:
-        print(f"Error loading datasets: {e}")
-        return
-
-    print(f"\n{'='*20}\nEvaluating on Test Set ({len(test_dset)} samples)\n{'='*20}")
+    test_dset = CHBMITDataset(args.data_path + '/test.h5')
     loader = DataLoader(test_dset, batch_size=args.batch_size, shuffle=False, num_workers=8)
     
     all_probs = []
@@ -297,7 +205,7 @@ def run_eval(args):
         samples = samples / 100.0
         samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
         
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             output = model(samples, input_chans=input_chans)
             probs = torch.sigmoid(output).squeeze()
         
@@ -307,28 +215,15 @@ def run_eval(args):
     y_prob = np.array(all_probs)
     y_true = np.array(all_targets)
 
-    scorenet_ckpt = getattr(args, 'scorenet_checkpoint', None)
-    if scorenet_ckpt:
-        print(f"\n--- ScoreNet Post-Processing ---")
-        sn_model = load_scorenet(scorenet_ckpt, device)
-        threshold = getattr(args, 'sn_threshold', 0.5)
-        min_dur = getattr(args, 'sn_min_dur', 10)
-        print(f"Params: threshold={threshold}, min_dur_sec={min_dur}")
-        y_pred_pp, y_refined = scorenet_postprocess(
-            y_prob, sn_model, device,
-            threshold=threshold, min_dur_sec=min_dur)
-    else:
-        print(f"\n--- Hand-Tuned Post-Processing ---")
-        print(f"Params: T_High={args.t_high}, T_Low={args.t_low}, Smooth={args.smooth}s, MinDur={args.min_dur}s")
-        y_pred_pp = post_process_probs(
-            y_prob,
-            t_high=args.t_high,
-            t_low=args.t_low,
-            smooth_window=args.smooth,
-            min_duration=args.min_dur
-        )
+    y_pred_pp = post_process_probs(
+        y_prob,
+        t_high=args.t_high,
+        t_low=args.t_low,
+        smooth_window=args.smooth,
+        min_duration=args.min_dur
+    )
     
-    print("\n--- Point-Wise Metrics ---")
+    print("point-wise metrics:")
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred_pp).ravel()
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
@@ -337,30 +232,15 @@ def run_eval(args):
     roc_auc = roc_auc_score(y_true, y_prob)
     pr_auc = average_precision_score(y_true, y_prob)
 
-    print(f"Sensitivity (Recall): {sensitivity:.4f}")
-    print(f"Specificity:          {specificity:.4f}")
-    print(f"Precision (PPV):      {precision:.4f}")
-    print(f"F1 Score:             {f1:.4f}")
-    print(f"AUPRC:                {pr_auc:.4f}")
-    print(f"AUROC:                {roc_auc:.4f}")
-    print(f"Confusion Matrix:     [TN={tn}, FP={fp}, FN={fn}, TP={tp}]")
+    print(f"recall:): {sensitivity}")
+    print(f"specificity:          {specificity}")
+    print(f"precision:      {precision}")
+    print(f"F1:             {f1}")
+    print(f"AUPRC:                {pr_auc}")
+    print(f"AUROC:                {roc_auc}")
+    print(f"cm:     [TN={tn}, FP={fp}, FN={fn}, TP={tp}]")
 
-    print("\n--- Event-Based Metrics (strict, no tolerances) ---")
-    pp_evt = compute_event_metrics(y_true, y_pred_pp)
-    
-    print(f"Total Seizures (GT): {pp_evt['Total Seizures']}")
-    print(f"Detected (TP):       {pp_evt['TP']} \t({pp_evt['Recall']*100:.1f}%)")
-    print(f"Missed (FN):         {pp_evt['FN']}")
-    print(f"False Alarms (FP):   {pp_evt['FP']}")
-    print(f"False Alarms/Hr:     {pp_evt['FAR/hr']:.4f}")
-    print(f"Event Precision:     {pp_evt['Precision']:.4f}")
-    print(f"Event F1:            {pp_evt['F1']:.4f}")
-
-    print(f"\n--- SzCORE Event-Based Metrics ---")
-    print(f"Params: pre_ictal={args.szcore_pre_ictal}s, "
-          f"post_ictal={args.szcore_post_ictal}s, "
-          f"merge_gap={args.szcore_merge_gap}s, "
-          f"max_event={args.szcore_max_event}s")
+    print(f"Event-based metrics:")
     szcore_evt = compute_szcore_event_metrics(
         y_true, y_pred_pp,
         stride_sec=1.0,
@@ -369,51 +249,82 @@ def run_eval(args):
         merge_gap_sec=args.szcore_merge_gap,
         max_event_sec=args.szcore_max_event,
     )
-    print(f"Total Events (ref):  {szcore_evt['Total Seizures (ref)']}")
-    print(f"Detected (TP):       {szcore_evt['TP']} \t({szcore_evt['Sensitivity']*100:.1f}%)")
-    print(f"Missed (FN):         {szcore_evt['FN']}")
-    print(f"False Alarms (FP):   {szcore_evt['FP']}")
-    print(f"Sensitivity:         {szcore_evt['Sensitivity']:.4f}")
-    print(f"Precision:           {szcore_evt['Precision']:.4f}")
-    print(f"F1:                  {szcore_evt['F1']:.4f}")
-    print(f"FAR/hr:              {szcore_evt['FAR/hr']:.4f}")
-    print(f"FAR/day:             {szcore_evt['FAR/day']:.4f}")
+    print(f"Total Events (ref):  {szcore_evt['Total Seizures']}")
+    print(f"Detected (TP):       {szcore_evt['TP']} \t({szcore_evt['Sensitivity']*100}%)")
+    print(f"missed:         {szcore_evt['FN']}")
+    print(f"false alarms:   {szcore_evt['FP']}")
+    print(f"sensitivity:         {szcore_evt['Sensitivity']}")
+    print(f"precision:           {szcore_evt['Precision']}")
+    print(f"F1:                  {szcore_evt['F1']}")
+    print(f"far/hr:              {szcore_evt['FAR/hr']}")
+    print(f"far/day:             {szcore_evt['FAR/day']}")
+
+    if args.scorenet_checkpoint:
+        sn_model = load_scorenet(args.scorenet_checkpoint, device)
+        y_pred_sn, y_refined = scorenet_postprocess(
+            y_prob, sn_model, device,
+            threshold=args.sn_threshold, min_dur_sec=args.sn_min_dur)
+
+        print(f"\nScoreNet post-processing (threshold={args.sn_threshold}, min_dur={args.sn_min_dur}):")
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred_sn).ravel()
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        f1 = f1_score(y_true, y_pred_sn, zero_division=0)
+        roc_auc_sn = roc_auc_score(y_true, y_refined)
+        pr_auc_sn = average_precision_score(y_true, y_refined)
+
+        print(f"recall:              {sensitivity}")
+        print(f"specificity:         {specificity}")
+        print(f"precision:           {precision}")
+        print(f"F1:                  {f1}")
+        print(f"AUPRC:               {pr_auc_sn}")
+        print(f"AUROC:               {roc_auc_sn}")
+        print(f"cm:     [TN={tn}, FP={fp}, FN={fn}, TP={tp}]")
+
+        szcore_sn = compute_szcore_event_metrics(
+            y_true, y_pred_sn,
+            stride_sec=1.0,
+            pre_ictal_sec=args.szcore_pre_ictal,
+            post_ictal_sec=args.szcore_post_ictal,
+            merge_gap_sec=args.szcore_merge_gap,
+            max_event_sec=args.szcore_max_event,
+        )
+        print(f"Total Events (ref):  {szcore_sn['Total Seizures (ref)']}")
+        print(f"Detected (TP):       {szcore_sn['TP']}")
+        print(f"missed:              {szcore_sn['FN']}")
+        print(f"false alarms:        {szcore_sn['FP']}")
+        print(f"sensitivity:         {szcore_sn['Sensitivity']}")
+        print(f"precision:           {szcore_sn['Precision']}")
+        print(f"F1:                  {szcore_sn['F1']}")
+        print(f"far/hr:              {szcore_sn['FAR/hr']}")
+        print(f"far/day:             {szcore_sn['FAR/day']}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', default='../datasets/CHBMIT', type=str)
+    parser.add_argument('--data_path', default='./data/CHBMIT', type=str)
     parser.add_argument('--checkpoint', default='./checkpoints/finetune_chbmit_v1/checkpoint-best.pth', type=str)
     parser.add_argument('--model', default='labram_base_patch200_200', type=str)
     parser.add_argument('--batch_size', default=2048, type=int)
     parser.add_argument('--device', default='cuda', type=str)
-    parser.add_argument('--dataset', default='CHBMIT', type=str,
-                        help='Dataset for channel names: CHBMIT | TUSZ')
-    parser.add_argument('--adversarial', action='store_true',
-                        help='Load an adversarial (GRL+Attention) checkpoint')
+    parser.add_argument('--dataset', default='CHBMIT', type=str)
+    parser.add_argument('--adversarial', action='store_true')
     
-    # Hand-tuned post-processing parameters
-    parser.add_argument('--t_high', default=0.40, type=float, help='High threshold for seizure trigger')
-    parser.add_argument('--t_low', default=0.20, type=float, help='Low threshold for seizure continuation')
-    parser.add_argument('--smooth', default=5, type=int, help='Smoothing window size (seconds)')
-    parser.add_argument('--min_dur', default=5, type=int, help='Minimum seizure duration (seconds)')
+    # post processing params
+    parser.add_argument('--t_high', default=0.40, type=float)
+    parser.add_argument('--t_low', default=0.20, type=float)
+    parser.add_argument('--smooth', default=5, type=int)
+    parser.add_argument('--min_dur', default=5, type=int)
 
-    # ScoreNet post-processing (overrides hand-tuned if provided)
-    parser.add_argument('--scorenet_checkpoint', default=None, type=str,
-                        help='Path to trained ScoreNet .pth; uses learned postprocessing')
-    parser.add_argument('--sn_threshold', default=0.5, type=float,
-                        help='Threshold for ScoreNet refined probabilities')
-    parser.add_argument('--sn_min_dur', default=10, type=int,
-                        help='Min event duration in seconds (ACNS: >=10s)')
+    # szcore params
+    parser.add_argument('--szcore_pre_ictal', default=30.0, type=float)
+    parser.add_argument('--szcore_post_ictal', default=60.0, type=float)
+    parser.add_argument('--szcore_merge_gap', default=90.0, type=float)
+    parser.add_argument('--szcore_max_event', default=300.0, type=float)
 
-    # SzCORE event-based scoring parameters
-    parser.add_argument('--szcore_pre_ictal', default=30.0, type=float,
-                        help='Pre-ictal tolerance in seconds (default: 30)')
-    parser.add_argument('--szcore_post_ictal', default=60.0, type=float,
-                        help='Post-ictal tolerance in seconds (default: 60)')
-    parser.add_argument('--szcore_merge_gap', default=90.0, type=float,
-                        help='Merge events closer than this gap in seconds (default: 90)')
-    parser.add_argument('--szcore_max_event', default=300.0, type=float,
-                        help='Split events longer than this in seconds (default: 300)')
+    parser.add_argument('--scorenet_checkpoint', default=None, type=str)
+    parser.add_argument('--sn_threshold', default=0.5, type=float)
+    parser.add_argument('--sn_min_dur', default=10, type=int)
 
     args = parser.parse_args()
     run_eval(args)

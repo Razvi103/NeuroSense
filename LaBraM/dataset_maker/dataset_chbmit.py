@@ -16,7 +16,6 @@ class CHBMITDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        # Shape is (Channels, Time) -> e.g. (19, 400) for TUSZ, (23, 400) for CHB-MIT
         data = self.h5_file['data'][idx]
         label = self.h5_file['labels'][idx]
         
@@ -27,10 +26,7 @@ class CHBMITDataset(Dataset):
 
 
 class CHBMITAdversarialDataset(Dataset):
-    """
-    CHB-MIT dataset that also returns patient IDs for adversarial training.
-    Falls back to patient_id=-1 if the HDF5 lacks the patient_ids field.
-    """
+
     def __init__(self, h5_path, transform=None):
         self.h5_path = h5_path
         self.h5_file = h5py.File(h5_path, 'r')
@@ -58,10 +54,6 @@ class CHBMITAdversarialDataset(Dataset):
 
 
 class TUSZAdversarialDataset(Dataset):
-    """
-    TUSZ dataset that also returns patient IDs for adversarial training.
-    Falls back to patient_id=-1 if the HDF5 lacks the patient_ids field.
-    """
     def __init__(self, h5_path, transform=None):
         self.h5_path = h5_path
         self.h5_file = h5py.File(h5_path, 'r')
@@ -89,13 +81,6 @@ class TUSZAdversarialDataset(Dataset):
 
 
 class MultiPatientAdversarialDataset(Dataset):
-    """
-    Loads and concatenates multiple per-patient H5 files for LOPOCV.
-
-    Each H5 file must contain 'data', 'labels', and 'patient_ids' datasets.
-    Samples are addressed via cumulative offsets so that individual H5 files
-    are never fully loaded into memory.
-    """
 
     def __init__(self, h5_paths):
         self.h5_files = []
