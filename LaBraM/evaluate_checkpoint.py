@@ -249,7 +249,6 @@ def run_eval(args):
         merge_gap_sec=args.szcore_merge_gap,
         max_event_sec=args.szcore_max_event,
     )
-    print(f"Total Events (ref):  {szcore_evt['Total Seizures']}")
     print(f"Detected (TP):       {szcore_evt['TP']} \t({szcore_evt['Sensitivity']*100}%)")
     print(f"missed:         {szcore_evt['FN']}")
     print(f"false alarms:   {szcore_evt['FP']}")

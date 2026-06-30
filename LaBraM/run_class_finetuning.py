@@ -2,7 +2,7 @@
 # Large Brain Model for Learning Generic Representations with Tremendous EEG Data in BCI
 # By Wei-Bang Jiang
 # Based on BEiT-v2, timm, DeiT, and DINO code bases
-# added for MIDAS: CHB-MIT and TUSZ dataset support, AdversarialNeuralTransformer model wrapping
+# new for MIDAS: CHB-MIT and TUSZ dataset support, AdversarialNeuralTransformer model wrapping
 
 import argparse
 import datetime

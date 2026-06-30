@@ -6,7 +6,7 @@
 # https://github.com/facebookresearch/deit/
 # https://github.com/facebookresearch/dino
 
-# additions in this file for MIDAS: get_grl_lambda, train_adversarial_batch, and train_one_epoch_adversarial
+# new for MIDAS: get_grl_lambda, train_adversarial_batch, and train_one_epoch_adversarial
 import math
 import sys
 from typing import Iterable, Optional

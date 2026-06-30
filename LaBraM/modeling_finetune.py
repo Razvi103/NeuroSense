@@ -5,7 +5,7 @@
 # https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # https://github.com/facebookresearch/deit/
 # https://github.com/facebookresearch/dino
-# added for MIDAS: GradientReversalFunction, GradientReversalLayer, ChannelAttention, PatientDiscriminator, and AdversarialNeuralTransformer
+# new for MIDAS: GradientReversalFunction, GradientReversalLayer, ChannelAttention, PatientDiscriminator, and AdversarialNeuralTransformer
 import math
 from functools import partial
 
